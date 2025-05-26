@@ -4,7 +4,8 @@ import copy
 import math # For sqrt if used for scaling embeddings
 
 from .common_layers import PositionalEncoding, PositionwiseFeedForward, TokenEmbedding
-from .attention.vanilla_mha import MultiHeadAttention
+# from .attention.vanilla_mha import MultiHeadAttention # Removed global import
+# from .attention.ahc_attention import AHCAttention # Removed global import
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -77,7 +78,7 @@ class TransformerEncoder(nn.Module):
     Args:
         vocab_size (int): Size of the input vocabulary.
         d_model (int): The dimension of the model (embeddings, attention, etc.).
-        n_heads (int): Number of attention heads in MultiHeadAttention.
+        attention_config (dict): Configuration for the attention module.
         num_encoder_layers (int): Number of stacked TransformerEncoderLayer instances.
         ffn_dim_factor (int, optional): Factor to determine d_ff (d_ff = d_model * ffn_dim_factor).
                                        Defaults to 4.
@@ -93,19 +94,19 @@ class TransformerEncoder(nn.Module):
         embedding_scale_grad_by_freq (bool, optional): Passed to TokenEmbedding for nn.Embedding's
                                                        `scale_grad_by_freq` argument. Defaults to False.
     """
-    def __init__(self, 
-                 vocab_size: int, 
-                 d_model: int, 
-                 n_heads: int, 
-                 num_encoder_layers: int, 
+    def __init__(self,
+                 vocab_size: int,
+                 d_model: int,
+                 attention_config: dict, # Added attention_config
+                 num_encoder_layers: int,
                  ffn_dim_factor: int = 4,
-                 dropout_rate: float = 0.1, 
+                 dropout_rate: float = 0.1,
                  use_positional_embeddings: bool = True,
                  pos_encoding_max_len: int = 5000,
                  embedding_scale_factor: float = None,
                  embedding_scale_grad_by_freq: bool = False):
         super().__init__()
-        
+
         self.d_model = d_model
         self.use_positional_embeddings = use_positional_embeddings
 
@@ -130,19 +131,67 @@ class TransformerEncoder(nn.Module):
 
         # 4. Encoder Layers
         d_ff = d_model * ffn_dim_factor
-        attention_module = MultiHeadAttention(d_model, n_heads, dropout_rate=dropout_rate)
-        feed_forward_module = PositionwiseFeedForward(d_model, d_ff, dropout_rate=dropout_rate)
+
+        # Dynamically instantiate attention module
+        attention_type = attention_config.get("type", "VanillaMHA")
         
+        if attention_type == "VanillaMHA":
+            from .attention.vanilla_mha import MultiHeadAttention # Dynamic import
+            # Ensure n_heads is present in attention_config for VanillaMHA
+            if "n_heads" not in attention_config:
+                raise ValueError("n_heads is required in attention_config for VanillaMHA")
+            
+            # Parameters for MultiHeadAttention
+            mha_n_heads = attention_config["n_heads"]
+            mha_dropout_rate = attention_config.get("dropout_rate", dropout_rate) # Use global dropout_rate as fallback
+
+            attention_module = MultiHeadAttention(
+                d_model=d_model,
+                n_heads=mha_n_heads,
+                dropout_rate=mha_dropout_rate
+            )
+        elif attention_type == "AHC":
+            from .attention.ahc_attention import AHCAttention # Dynamic import
+            
+            # Prepare parameters for AHCAttention
+            # d_model is passed directly.
+            # Other AHC-specific parameters (n_heads, chunk_size, configs for summarization, global, combination)
+            # should be within attention_config.
+            # The AHCAttention module itself will handle defaults if specific sub-configs are missing.
+            
+            ahc_constructor_params = attention_config.copy() # Create a copy to modify
+            ahc_constructor_params.pop("type") # Remove 'type' as it's not an AHCAttention constructor arg
+            
+            # Ensure d_model is passed from TransformerEncoder's d_model
+            ahc_constructor_params["d_model"] = d_model 
+            # Ensure dropout_rate is passed, defaulting to TransformerEncoder's dropout_rate
+            # AHCAttention's __init__ expects 'dropout_rate', not 'dropout' from config.
+            ahc_constructor_params.setdefault("dropout_rate", dropout_rate)
+
+            # n_heads for AHC is also expected inside attention_config directly (used for local MHA in AHC)
+            if "n_heads" not in ahc_constructor_params:
+                 raise ValueError("n_heads is required in attention_config for AHCAttention")
+
+            # Other required AHC params (like chunk_size, summarization_method_config, etc.)
+            # are expected to be in ahc_constructor_params (copied from attention_config).
+            # AHCAttention's __init__ will raise errors if they are missing.
+
+            attention_module = AHCAttention(**ahc_constructor_params)
+        else:
+            raise ValueError(f"Unsupported attention type: {attention_type}")
+
+        feed_forward_module = PositionwiseFeedForward(d_model, d_ff, dropout_rate=dropout_rate)
+
         # Note: The dropout_rate passed to TransformerEncoderLayer is for dropout on att_output and ffn_output
         # within that layer, before the residual connection.
         encoder_layer = TransformerEncoderLayer(
-            d_model, 
-            attention_module, 
-            feed_forward_module, 
-            dropout_rate=dropout_rate 
+            d_model,
+            attention_module,
+            feed_forward_module,
+            dropout_rate=dropout_rate
         )
         self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _ in range(num_encoder_layers)])
-        
+
         # 5. Final Layer Normalization (applied after all encoder layers)
         self.norm = nn.LayerNorm(d_model, eps=1e-6)
 

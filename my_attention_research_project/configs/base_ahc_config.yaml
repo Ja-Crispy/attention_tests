@@ -1,0 +1,67 @@
+# Base Configuration for Advanced Hierarchical Chunking (AHC)
+
+model:
+  # TransformerEncoder overall parameters (can be adjusted)
+  d_model: 512
+  num_encoder_layers: 6
+  ffn_dim_factor: 4 # d_ff = d_model * ffn_dim_factor
+  dropout_rate: 0.1 # General dropout for FFN, embeddings, etc.
+  use_positional_embeddings: True
+
+  # Attention specific configuration
+  attention:
+    type: "AHC"       # Specifies the AHC attention module
+    # dropout_rate: 0.1 # Dropout for attention mechanisms (can be same as global or specific)
+                        # If not specified here, AHCAttention will use TransformerEncoder's dropout_rate.
+
+    # AHCAttention specific parameters
+    n_heads: 8          # Number of heads for local MHA (and default for global if not specified in G1)
+    chunk_size: 64      # Size of chunks for local attention
+
+    summarization_method_config:
+      type: "S1_pool"   # Options: "S1_pool", "S2_linear_on_pool"
+      pool_type: "mean" # Options: "mean", "max" (applies to both S1 and S2's pooling stage)
+
+    # Example for S2_linear_on_pool:
+    # summarization_method_config:
+    #   type: "S2_linear_on_pool"
+    #   pool_type: "mean" 
+
+    global_attention_method_config:
+      type: "G1_full_mha" # Currently only G1_full_mha is implemented
+      num_heads: 8        # Number of heads for global MHA on summaries (can be same as local or different)
+      # dropout_rate: 0.1 # Optional: specific dropout for global MHA
+
+    combination_method_config:
+      type: "C1_broadcast_add" # Currently only C1_broadcast_add is implemented
+
+# Data configuration (example, can be same as base_mha_config.yaml)
+data:
+  dataset_name: "WikiText103"
+  sequence_length: 512
+  batch_size: 32
+  data_dir: "./data/processed/wikitext-103"
+  tokenizer_path: "./data/tokenizers/wikitext103_bpe.tokenizer.json"
+
+# Training configuration (example, can be same as base_mha_config.yaml)
+training:
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  num_epochs: 10 # Adjust as needed
+  random_seed: 42
+  gradient_clipping: 1.0
+  lr_scheduler:
+    type: "cosine_annealing"
+    warmup_steps: 1000
+    min_lr: 0.00001
+
+# Benchmarking specific settings
+benchmarking:
+  batch_size_inference: 64
+  perplexity_eval_sequence_lengths: [512, 1024, 2048] # Should be multiples of chunk_size for AHC
+
+# Logging
+logging:
+  log_level: "INFO"
+  log_file: "training_ahc.log"
