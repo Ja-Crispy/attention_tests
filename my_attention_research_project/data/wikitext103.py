@@ -155,27 +155,19 @@ class CausalLMTrainingDataset(Dataset):
         if self.input_ids.size(0) != self.attention_mask.size(0):
             raise ValueError("'input_ids' and 'attention_mask' must have the same length.")
 
-        # Calculate the number of examples. We drop the last partial sequence.
-        # For causal LM, input is x[:-1] and target is x[1:], so we need sequence_length + 1 tokens
-        # to form one complete input/target pair.
-        if self.input_ids.size(0) <= self.sequence_length:
-            self.num_examples = 0
-        else:
-            # Number of full sequence_length blocks we can make from the available tokens.
-            # Example: tokens = 10, seq_len = 3.
-            # Chunks: [0,1,2,3], [1,2,3,4] ...
-            # Start indices: 0, 1*seq_len, 2*seq_len ...
-            # Last possible start_index for a full (seq_len+1) chunk: total_tokens - (seq_len+1)
-            # num_examples = (total_tokens - (seq_len+1)) // seq_len + 1  -- this is for overlapping
-            # For non-overlapping full sequences:
-            self.num_examples = (self.input_ids.size(0) - 1) // self.sequence_length
-        
-        if self.num_examples <= 0:
-             raise ValueError(
-                f"Not enough data for sequence length {self.sequence_length}. "
-                f"Data has {self.input_ids.size(0)} tokens. Need at least {self.sequence_length + 1} tokens "
-                f"to form one input/target pair. Calculated examples: {self.num_examples}"
-            )
+        # Ensure at least one example by padding if necessary
+        min_tokens = self.sequence_length + 1
+        if self.input_ids.size(0) < min_tokens:
+            pad_len = min_tokens - self.input_ids.size(0)
+            pad_ids = torch.full((pad_len,), self.pad_token_id, dtype=torch.long)
+            pad_attn = torch.zeros((pad_len,), dtype=torch.long)
+            self.input_ids = torch.cat([self.input_ids, pad_ids], dim=0)
+            self.attention_mask = torch.cat([self.attention_mask, pad_attn], dim=0)
+            print(f"Padded dataset to {min_tokens} tokens for sequence length {self.sequence_length}.")
+
+        # Calculate the number of examples. We drop any extra tokens beyond full sequences.
+        # Each example is sequence_length tokens input and sequence_length tokens target (shifted by 1).
+        self.num_examples = (self.input_ids.size(0) - 1) // self.sequence_length
         print(f"Dataset loaded. Total tokens: {self.input_ids.size(0)}. Num examples for seq_len {self.sequence_length}: {self.num_examples}")
 
     def __len__(self):
