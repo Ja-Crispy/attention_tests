@@ -1,0 +1,39 @@
+# Base Configuration for Vanilla MHA
+
+model:
+  type: "VanillaMHA" # To identify the model type
+  d_model: 512
+  n_heads: 8
+  num_encoder_layers: 6
+  ffn_dim_factor: 4 # d_ff = d_model * ffn_dim_factor
+  dropout_rate: 0.1
+  use_positional_embeddings: True # Toggle for positional embeddings
+
+data:
+  dataset_name: "WikiText103"
+  sequence_length: 512
+  batch_size: 32
+  data_dir: "./data/processed/wikitext-103" # Example path
+  tokenizer_path: "./data/tokenizers/wikitext103_bpe.tokenizer.json" # Example path
+
+training:
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  num_epochs: 10
+  random_seed: 42
+  gradient_clipping: 1.0 # Max norm for gradient clipping
+  lr_scheduler: # Optional: configuration for a scheduler
+    type: "cosine_annealing" # e.g., cosine_annealing, linear_warmup_decay
+    warmup_steps: 1000 # if applicable
+    min_lr: 0.00001 # if applicable
+
+# Benchmarking specific settings (can be expanded later)
+benchmarking:
+  batch_size_inference: 64
+  perplexity_eval_sequence_lengths: [512, 1024, 2048]
+
+# Logging
+logging:
+  log_level: "INFO"
+  log_file: "training.log" # Optional: file to log to
