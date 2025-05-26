@@ -78,3 +78,43 @@ class PositionwiseFeedForward(nn.Module):
         x = self.dropout(x)
         x = self.linear2(x)
         return x
+
+class TokenEmbedding(nn.Module):
+    """
+    Token Embedding layer.
+    Simply wraps nn.Embedding.
+    Includes an optional scaling factor for the embeddings as used in some Transformer variants.
+    """
+    def __init__(self, vocab_size: int, d_model: int, scale_grad_by_freq: bool = False, scale_factor: float = None):
+        """
+        Args:
+            vocab_size (int): Size of the vocabulary.
+            d_model (int): Dimension of the embeddings.
+            scale_grad_by_freq (bool): If True, gradients w.r.t. input tokens will be scaled by the inverse
+                                       of the frequency of the token in the batch. Default is False.
+                                       (Note: nn.Embedding's scale_grad_by_freq is about word frequency in general,
+                                       not batch. This is a standard nn.Embedding parameter.)
+            scale_factor (float, optional): If provided, the embedding outputs are multiplied by this factor.
+                                            Some models multiply embeddings by sqrt(d_model). Defaults to None.
+        """
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, d_model, scale_grad_by_freq=scale_grad_by_freq)
+        self.d_model = d_model
+        self.scale_factor = scale_factor
+        if self.scale_factor is None and d_model is not None: # Common practice is to scale by sqrt(d_model)
+             # self.scale_factor = math.sqrt(d_model) # Enable if scaling by sqrt(d_model) is desired by default
+             pass
+
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            tokens (torch.Tensor): Input tokens, shape (batch_size, seq_len).
+
+        Returns:
+            torch.Tensor: Embedded tokens, shape (batch_size, seq_len, d_model).
+        """
+        embeddings = self.embedding(tokens)
+        if self.scale_factor is not None:
+            embeddings = embeddings * self.scale_factor
+        return embeddings

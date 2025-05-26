@@ -1,205 +1,309 @@
-# Placeholder for wikitext103.py
-# This file will handle downloading, preprocessing, and serving WikiText-103.
+# text_dataset_utils.py (conceptually, actual filename: wikitext103.py)
+# Handles downloading/creating raw text, preprocessing for Causal LM, and serving via PyTorch Dataset.
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
-import shutil # For robust directory removal
+import shutil # For robust directory removal in examples
+import json # For saving/loading processed data list
 
-# from tokenizers import ByteLevelBPETokenizer # Or your specific tokenizer class
+# Import from the project's tokenizer.py
+from .tokenizer import load_tokenizer, tokenize_function 
 
-# (Assuming tokenizer module is in the same directory or installed)
-# from .tokenizer import load_tokenizer # Example of relative import
-
-def download_wikitext103(data_dir: str = "./data/raw/wikitext-103") -> None:
+def download_raw_text_files(raw_data_dir: str) -> None:
     """
-    Downloads the WikiText-103 dataset.
-    (Actual download logic is complex and typically involves manual steps or specific library calls)
+    Creates dummy raw text files (train.txt, valid.txt, test.txt) in the specified directory.
+    This simulates a dataset download for easier testing.
+
+    Args:
+        raw_data_dir (str): Path to the directory where raw text files will be created.
     """
-    print(f"Attempting to download WikiText-103 to {data_dir}...")
-    Path(data_dir).mkdir(parents=True, exist_ok=True)
-    # Placeholder: In a real scenario, this would use requests, wget, or a library like datasets from Hugging Face.
-    # Example: datasets.load_dataset('wikitext', 'wikitext-103-raw-v1', cache_dir=data_dir)
-    print("Placeholder: WikiText-103 download step.")
-    print("NOTE: Actual dataset download requires internet access and specific download commands/APIs.")
-    # Create dummy files to simulate download for now
-    # Make dummy files a bit longer to better support sequence length tests
-    (Path(data_dir) / "wiki.train.raw").write_text(
-        "This is a dummy training sentence from wikitext103. More text would be here for real training. "
-        + "This sentence needs to be long enough to support some sequence length. We will repeat it multiple times to ensure that. "
-        + ("This is a dummy training sentence from wikitext103. " * 50)
-    )
-    (Path(data_dir) / "wiki.valid.raw").write_text(
-        "This is a dummy validation sentence. It is used for evaluation during training. "
-        + "It also needs to be sufficiently long. "
-        + ("This is a dummy validation sentence. " * 30)
-    )
-    (Path(data_dir) / "wiki.test.raw").write_text(
-        "This is a dummy test sentence. Final performance is measured here after all training and validation. "
-        + "It must also be long. "
-        + ("This is a dummy test sentence. " * 30)
-    )
-    print(f"Created dummy raw files in {data_dir}")
+    print(f"Creating dummy raw text files in {raw_data_dir}...")
+    Path(raw_data_dir).mkdir(parents=True, exist_ok=True)
 
+    dummy_train_text = (
+        "Chapter 1: The Beginning.\nIt was a dark and stormy night. The wind howled, and rain lashed against the window panes. "
+        "Inside, by the fireplace, sat a lone figure, pondering the mysteries of the universe. "
+        "This text is meant for training. It needs to be long enough to create multiple sequences. "
+        "Causal language modeling is a fascinating subject. We predict the next token given previous tokens. "
+        "Let's add more sentences to make this sufficiently long for our dummy dataset. "
+        + ("This is a repeated sentence for length. " * 100)
+        + "End of training chapter 1."
+    )
+    (Path(raw_data_dir) / "train.txt").write_text(dummy_train_text, encoding='utf-8')
 
-def preprocess_wikitext103(
-    raw_data_dir: str, # Directory with raw files (e.g., wiki.train.raw)
-    processed_data_dir: str, # Directory to save tokenized data
-    tokenizer_path: str, # Path to the trained tokenizer file/directory
-    sequence_length: int # For context, though direct use here is conceptual for placeholder
+    dummy_valid_text = (
+        "Chapter 1: Validation Passages.\nValidation text helps tune hyperparameters. It should be different from the training set. "
+        "Consider this a new chapter, exploring similar themes but with different words. "
+        "The figure by the fireplace stirred, a new thought dawning. "
+        + ("This is a repeated validation sentence. " * 50)
+        + "End of validation chapter 1."
+    )
+    (Path(raw_data_dir) / "valid.txt").write_text(dummy_valid_text, encoding='utf-8')
+
+    dummy_test_text = (
+        "Chapter 1: The Final Test.\nTest data provides the final evaluation. It must not be seen during training or validation. "
+        "The storm had passed, and a quiet dawn approached. The answers were becoming clear. "
+        + ("This is a repeated test sentence. " * 50)
+        + "End of test chapter 1."
+    )
+    (Path(raw_data_dir) / "test.txt").write_text(dummy_test_text, encoding='utf-8')
+    
+    print(f"Created dummy files: train.txt, valid.txt, test.txt in {raw_data_dir}")
+
+def preprocess_text_files_for_causal_lm(
+    raw_data_dir: str, 
+    processed_data_dir: str, 
+    tokenizer_name_or_path: str, 
+    config: dict
 ) -> None:
     """
-    Tokenizes the raw WikiText-103 files and saves them as tensors or memory-mapped files.
+    Processes raw text files for Causal Language Modeling.
+    Each raw text file (train.txt, valid.txt, test.txt) is tokenized
+    and its entire content is saved as a single JSON line in a corresponding .jsonl file.
+
+    Args:
+        raw_data_dir (str): Directory containing raw text files (train.txt, etc.).
+        processed_data_dir (str): Directory to save the processed .jsonl files.
+        tokenizer_name_or_path (str): Name or path of the Hugging Face tokenizer.
+        config (dict): Configuration dictionary, expected to contain:
+                       `config['data']['tokenizer_max_length']`
+                       `config['data']['sequence_length']` (though not directly used here, good for context)
     """
-    print(f"Preprocessing WikiText-103 from {raw_data_dir} to {processed_data_dir}...")
-    print(f"Using tokenizer (placeholder) from {tokenizer_path}")
-    
-    # In a real scenario:
-    # from .tokenizer import load_tokenizer # Assuming load_tokenizer is in the same directory
-    # tokenizer = load_tokenizer(tokenizer_path) 
-    
+    print(f"Preprocessing text files from {raw_data_dir} to {processed_data_dir} for Causal LM...")
     Path(processed_data_dir).mkdir(parents=True, exist_ok=True)
 
+    tokenizer_max_len = config.get('data', {}).get('tokenizer_max_length', 1024)
+    print(f"Using tokenizer: {tokenizer_name_or_path} with max_length: {tokenizer_max_len}")
+    tokenizer = load_tokenizer(tokenizer_name_or_path, max_length=tokenizer_max_len)
+
     for split in ["train", "valid", "test"]:
-        raw_file_path = Path(raw_data_dir) / f"wiki.{split}.raw"
-        processed_file_path = Path(processed_data_dir) / f"wikitext103.{split}.ids.pt" # Saving as PyTorch tensor
-        
+        raw_file_path = Path(raw_data_dir) / f"{split}.txt"
+        processed_file_path = Path(processed_data_dir) / f"{split}.jsonl"
+
         if not raw_file_path.exists():
             print(f"Warning: Raw file {raw_file_path} not found. Skipping preprocessing for this split.")
             continue
 
         print(f"Processing {raw_file_path}...")
-        # text = raw_file_path.read_text(encoding='utf-8')
-        # token_ids = tokenizer.encode(text).ids # This is for a single string. For large files, process line by line.
+        text_content = raw_file_path.read_text(encoding='utf-8')
+
+        if not text_content.strip():
+            print(f"Warning: Raw file {raw_file_path} is empty or contains only whitespace. Skipping.")
+            continue
         
-        # Placeholder for tokenization and tensor conversion
-        # For large datasets, process in chunks and perhaps save as memory-mapped files or multiple tensors.
-        # For causal LM, usually concatenate all text and then chunk it.
+        # Tokenize the entire content of the file.
+        # Using do_not_pad as we are tokenizing the whole file, then chunking in Dataset.
+        # Truncation is important if file content > tokenizer_max_len.
+        tokenized_data = tokenize_function(
+            text_content, 
+            tokenizer, 
+            max_length=tokenizer_max_len, # This will truncate if file content is too long
+            padding_strategy="do_not_pad", # No padding, we get one long sequence
+            truncation_strategy=True
+        )
         
-        raw_text_content = raw_file_path.read_text(encoding='utf-8')
-        # Simulate token IDs based on length of text; split by space for a rough word count, then multiply.
-        # This aims to create enough tokens for a few sequences of length `sequence_length`.
-        num_simulated_tokens = len(raw_text_content.split()) * 5 # Each word roughly 5 tokens
-        # Ensure a minimum number of tokens, e.g., enough for 10 sequences.
-        min_tokens_needed = (sequence_length + 1) * 10
-        if num_simulated_tokens < min_tokens_needed:
-            num_simulated_tokens = min_tokens_needed
-            print(f"Warning: Raw text for {split} is very short. Generating {num_simulated_tokens} dummy tokens.")
+        input_ids_list = tokenized_data["input_ids"].tolist()
+        attention_mask_list = tokenized_data["attention_mask"].tolist()
+
+        # Save as a single JSON line in the .jsonl file
+        with open(processed_file_path, 'w', encoding='utf-8') as f:
+            json_record = {"input_ids": input_ids_list, "attention_mask": attention_mask_list}
+            f.write(json.dumps(json_record) + '\n')
+        
+        print(f"Saved processed data for {split} to {processed_file_path} ({len(input_ids_list)} tokens).")
+
+    print("Preprocessing complete.")
 
 
-        dummy_tensor = torch.randint(0, 30000, (num_simulated_tokens,)) # Vocab size 30000
-        torch.save(dummy_tensor, processed_file_path)
-        print(f"Placeholder: Saved dummy processed data to {processed_file_path} with {num_simulated_tokens} tokens.")
-
-    print("NOTE: Actual preprocessing is more complex (handling large files, tokenization, tensor conversion).")
-
-
-class WikiTextDataset(Dataset):
-    def __init__(self, file_path: str, sequence_length: int):
+class CausalLMTrainingDataset(Dataset):
+    def __init__(self, file_path: str, sequence_length: int, pad_token_id: int):
         """
+        Dataset for Causal Language Modeling.
+        Reads a .jsonl file where each line contains tokenized 'input_ids' and 'attention_mask'
+        for an entire dataset split (e.g., all training text).
+        This Dataset class then chunks this long sequence into smaller, fixed-length sequences.
+
         Args:
-            file_path (str): Path to the processed (tokenized) data file (e.g., a .pt file with a tensor of token IDs).
+            file_path (str): Path to the processed .jsonl file (e.g., train.jsonl).
+                             Expects a single JSON line in the file.
             sequence_length (int): The length of sequences to return.
+            pad_token_id (int): The ID of the PAD token from the tokenizer, used for padding if needed
+                                (though not explicitly used for padding here, good for context).
         """
-        print(f"Initializing WikiTextDataset with file: {file_path}, sequence_length: {sequence_length}")
+        print(f"Initializing CausalLMTrainingDataset from: {file_path}, sequence_length: {sequence_length}")
         if not Path(file_path).exists():
             raise FileNotFoundError(f"Processed data file not found: {file_path}")
-            
-        self.data = torch.load(file_path) # Expects a 1D tensor of token IDs
-        self.sequence_length = sequence_length
-        
-        # Ensure data is 1D
-        if self.data.dim() != 1:
-            raise ValueError(f"Data in {file_path} must be a 1D tensor of token IDs.")
 
-        # Calculate the number of examples
-        # For causal language modeling, typically, data is chunked into sequence_length + 1
-        # where input is x[:-1] and target is x[1:]
-        # We drop the last partial sequence.
-        self.num_examples = (self.data.size(0) - 1) // self.sequence_length
+        with open(file_path, 'r', encoding='utf-8') as f:
+            line = f.readline() # Expecting only one line for the entire split
+            if not line:
+                raise ValueError(f"Processed data file {file_path} is empty.")
+            try:
+                data_record = json.loads(line)
+            except json.JSONDecodeError:
+                raise ValueError(f"Error decoding JSON from {file_path}. Ensure it's a valid JSON line.")
+
+        self.input_ids = torch.tensor(data_record['input_ids'], dtype=torch.long)
+        self.attention_mask = torch.tensor(data_record['attention_mask'], dtype=torch.long)
+        
+        self.sequence_length = sequence_length
+        self.pad_token_id = pad_token_id # Stored for reference, might be useful later
+
+        if self.input_ids.dim() != 1 or self.attention_mask.dim() != 1:
+            raise ValueError("Loaded 'input_ids' and 'attention_mask' must be 1D tensors (lists in JSON).")
+        if self.input_ids.size(0) != self.attention_mask.size(0):
+            raise ValueError("'input_ids' and 'attention_mask' must have the same length.")
+
+        # Calculate the number of examples. We drop the last partial sequence.
+        # For causal LM, input is x[:-1] and target is x[1:], so we need sequence_length + 1 tokens
+        # to form one complete input/target pair.
+        if self.input_ids.size(0) <= self.sequence_length:
+            self.num_examples = 0
+        else:
+            # Number of full sequence_length blocks we can make from the available tokens.
+            # Example: tokens = 10, seq_len = 3.
+            # Chunks: [0,1,2,3], [1,2,3,4] ...
+            # Start indices: 0, 1*seq_len, 2*seq_len ...
+            # Last possible start_index for a full (seq_len+1) chunk: total_tokens - (seq_len+1)
+            # num_examples = (total_tokens - (seq_len+1)) // seq_len + 1  -- this is for overlapping
+            # For non-overlapping full sequences:
+            self.num_examples = (self.input_ids.size(0) - 1) // self.sequence_length
         
         if self.num_examples <= 0:
              raise ValueError(
                 f"Not enough data for sequence length {self.sequence_length}. "
-                f"Data has {self.data.size(0)} tokens, need at least {self.sequence_length + 1} "
-                f"to form one input/target pair. Number of examples calculated: {self.num_examples}"
+                f"Data has {self.input_ids.size(0)} tokens. Need at least {self.sequence_length + 1} tokens "
+                f"to form one input/target pair. Calculated examples: {self.num_examples}"
             )
-
+        print(f"Dataset loaded. Total tokens: {self.input_ids.size(0)}. Num examples for seq_len {self.sequence_length}: {self.num_examples}")
 
     def __len__(self):
         return self.num_examples
 
     def __getitem__(self, idx):
         """
-        Returns a tuple (input_ids, target_ids).
-        For causal LM, input_ids are tokens 0 to N-1, and target_ids are tokens 1 to N.
+        Returns a dictionary `{"input_ids": ..., "attention_mask": ..., "labels": ...}`.
+        'labels' are the target_ids, with padding tokens masked to -100.
         """
         start_index = idx * self.sequence_length
         # Slice to get sequence_length + 1 tokens to form input and target
-        chunk = self.data[start_index : start_index + self.sequence_length + 1]
+        # This chunk contains tokens for both input and the target (shifted by one)
+        end_index = start_index + self.sequence_length + 1
+        full_chunk = self.input_ids[start_index:end_index]
         
-        input_ids = chunk[:-1]
-        target_ids = chunk[1:]
+        input_ids_chunk = full_chunk[:-1]
+        target_ids_chunk = full_chunk[1:].clone() # Clone to modify for labels
+
+        # Fetch the corresponding attention mask for the input sequence
+        # This mask indicates real tokens (1) vs padding (0) in the original tokenized stream.
+        # Note: If preprocess used do_not_pad and truncate, attention_mask for the loaded part should be all 1s
+        # up to the truncation length of the original file.
+        attention_mask_chunk = self.attention_mask[start_index : start_index + self.sequence_length]
+
+        # Create labels: where attention_mask_chunk is 0 (padding in source), set target_ids to -100
+        # This is crucial for Causal LM if the original long sequence had padding due to truncation
+        # by tokenizer_max_length when the whole file was tokenized.
+        # If using 'do_not_pad' and the source text was shorter than tokenizer_max_length,
+        # the attention_mask for actual tokens will be all 1s.
+        target_ids_chunk.masked_fill_(attention_mask_chunk == 0, -100)
         
-        return input_ids, target_ids
+        return {
+            "input_ids": input_ids_chunk, 
+            "attention_mask": attention_mask_chunk, 
+            "labels": target_ids_chunk
+        }
 
 if __name__ == '__main__':
-    # Example Usage (placeholder)
-    print("WikiText103 module example usage:")
+    print("Text Dataset Utilities example usage:")
     
-    main_example_dir_name = "wikitext103_example_main_run_final" # Unique name for this version
-    base_data_dir = Path("./data") 
+    main_example_dir_name = "text_dataset_utils_example_run"
+    base_dir = Path("./data") / main_example_dir_name
+    raw_dir = base_dir / "raw_text"
+    processed_dir = base_dir / "processed_text_for_causal_lm"
     
-    # Define paths using a unique base directory for this run to avoid conflicts
-    example_base_dir = base_data_dir / main_example_dir_name
-    raw_dir = example_base_dir / "raw/wikitext-103"
-    processed_dir = example_base_dir / "processed/wikitext-103"
-    dummy_tokenizer_file = example_base_dir / "tokenizers/dummy_tokenizer.json"
-
     # Ensure a clean state for the example run
-    if example_base_dir.exists():
-        shutil.rmtree(example_base_dir)
-        print(f"Cleaned up existing example directory: {example_base_dir}")
-
-    # Create dummy tokenizer file for example to run
-    dummy_tokenizer_file.parent.mkdir(parents=True, exist_ok=True)
-    # A minimal valid JSON for a Hugging Face tokenizer file (or just any placeholder file).
-    dummy_tokenizer_file.write_text('{"version": "1.0", "model": {"type": "BPE"}}')
-
-    # 1. Download (creates dummy files)
-    download_wikitext103(str(raw_dir))
+    if base_dir.exists():
+        shutil.rmtree(base_dir)
     
-    # 2. Preprocess (creates dummy processed files)
-    example_seq_len = 64 # Use a sequence length that should work with the dummy data size
-    preprocess_wikitext103(raw_data_dir=str(raw_dir), 
-                           processed_data_dir=str(processed_dir), 
-                           tokenizer_path=str(dummy_tokenizer_file), 
-                           sequence_length=example_seq_len) # Pass seq_len for context in preprocessing
-    
-    # 3. Dataset and DataLoader
+    # Config for the example
+    # For GPT-2, pad_token_id is often the same as eos_token_id (e.g., 50256)
+    # We will fetch it from the tokenizer after loading.
+    example_config = {
+        'data': {
+            'sequence_length': 64, 
+            'tokenizer_max_length': 256 # Smaller for faster example processing of dummy text
+        },
+        'model': { # This section might be for model parameters, but we use pad_token_id from tokenizer
+            # 'pad_token_id': 50256 # Placeholder, will be set by tokenizer
+        }
+    }
+    tokenizer_name_for_example = "gpt2" 
+
     try:
-        train_file_path = processed_dir / "wikitext103.train.ids.pt"
-        if train_file_path.exists():
-            dataset = WikiTextDataset(file_path=str(train_file_path), sequence_length=example_seq_len) 
+        # 1. "Download" raw text files (creates dummy files)
+        download_raw_text_files(str(raw_dir))
+
+        # 2. Preprocess text files
+        preprocess_text_files_for_causal_lm(
+            raw_data_dir=str(raw_dir),
+            processed_data_dir=str(processed_dir),
+            tokenizer_name_or_path=tokenizer_name_for_example,
+            config=example_config
+        )
+
+        # 3. Instantiate Dataset and DataLoader
+        # Load tokenizer once to get pad_token_id for the Dataset
+        # This ensures pad_token_id is consistent with the tokenizer used for preprocessing.
+        temp_tokenizer = load_tokenizer(tokenizer_name_for_example)
+        pad_token_id_for_dataset = temp_tokenizer.pad_token_id
+        if pad_token_id_for_dataset is None: # Should be handled by load_tokenizer, but as a safeguard
+            pad_token_id_for_dataset = temp_tokenizer.eos_token_id if temp_tokenizer.eos_token_id is not None else 0
+            print(f"Warning: PAD token ID was None, using EOS or 0: {pad_token_id_for_dataset}")
+        del temp_tokenizer # No longer needed
+
+        train_jsonl_path = processed_dir / "train.jsonl"
+        if train_jsonl_path.exists():
+            dataset = CausalLMTrainingDataset(
+                file_path=str(train_jsonl_path), 
+                sequence_length=example_config['data']['sequence_length'],
+                pad_token_id=pad_token_id_for_dataset
+            )
+            
             if len(dataset) > 0:
-                 print(f"Created dataset with {len(dataset)} examples.")
-                 dataloader = DataLoader(dataset, batch_size=2) # Smaller batch for dummy data
-                 first_batch_input, first_batch_target = next(iter(dataloader))
-                 print(f"First batch input shape: {first_batch_input.shape}")   # Expected: [batch_size, sequence_length]
-                 print(f"First batch target shape: {first_batch_target.shape}") # Expected: [batch_size, sequence_length]
+                dataloader = DataLoader(dataset, batch_size=2)
+                print(f"\nCreated CausalLMTrainingDataset with {len(dataset)} examples.")
+                
+                first_batch = next(iter(dataloader))
+                print("\nFirst batch details:")
+                print(f"  Input IDs shape: {first_batch['input_ids'].shape}")   # Expected: [batch_size, sequence_length]
+                print(f"  Attention Mask shape: {first_batch['attention_mask'].shape}") # Expected: [batch_size, sequence_length]
+                print(f"  Labels shape: {first_batch['labels'].shape}")         # Expected: [batch_size, sequence_length]
+                
+                print("\nSample from first batch:")
+                print(f"  Input IDs (sample 0): {first_batch['input_ids'][0][:20]}...") # Print first 20 tokens
+                print(f"  Attention Mask (sample 0): {first_batch['attention_mask'][0][:20]}...")
+                print(f"  Labels (sample 0): {first_batch['labels'][0][:20]}...")
+                # Check if -100 is present in labels where attention mask might be 0 (if any padding occurred)
+                # For this dummy data and 'do_not_pad' with sufficient tokenizer_max_length, mask should be all 1s.
+                if (first_batch['labels'] == -100).any():
+                    print("  Note: -100 found in labels, indicating masked tokens.")
+                else:
+                    print("  Note: No -100 found in labels for this batch (likely no padding in source chunk or mask is all 1s).")
+
             else:
-                print("Dataset created but contains no examples. Dummy data might be too small for chosen sequence length.")
+                print("Dataset created but contains no examples. Dummy data might be too short or seq_len too long.")
         else:
-            print(f"Processed training file {train_file_path} not found. Cannot create dataset.")
-    except ValueError as e: # Catch ValueError specifically from Dataset init
-        print(f"Error creating dataset: {e}")
-        print("This is often due to dummy data being too small for the specified sequence lengths.")
+            print(f"Processed training file {train_jsonl_path} not found. Cannot create dataset.")
+
     except Exception as e:
-        print(f"An unexpected error occurred in dataset/dataloader example: {e}")
+        print(f"An error occurred in the example usage: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Clean up dummy files and directories
+        if base_dir.exists():
+            shutil.rmtree(base_dir)
+            print(f"\nCleaned up example directory: {base_dir}")
 
-    # Clean up dummy files and directories created by this __main__ block
-    if example_base_dir.exists():
-        shutil.rmtree(example_base_dir)
-        print(f"Cleaned up example directory: {example_base_dir}")
-
-    print("NOTE: Data processing functionality is currently placeholder and uses dummy data.")
+    print("\nText Dataset Utilities example finished.")
