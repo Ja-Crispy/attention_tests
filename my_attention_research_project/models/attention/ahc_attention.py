@@ -153,6 +153,27 @@ class AHCAttention(nn.Module):
         return summary_tokens
 
     def _chunk_input(self, input_tensor: torch.Tensor, input_tensor_mask: torch.Tensor = None):
+        """
+        Pads and reshapes the input tensor and its mask into chunks.
+        Pads the input tensor and mask along the sequence length dimension 
+        if original_seq_len is not a multiple of chunk_size, ensuring all chunks are full.
+
+        Args:
+            input_tensor (torch.Tensor): Input tensor.
+                                         Shape: (batch_size, original_seq_len, d_model).
+            input_tensor_mask (torch.Tensor, optional): Mask for input_tensor. 
+                                                        Expected shape: (batch_size, 1, 1, original_seq_len). 
+                                                        Values: 0.0 for pad/mask, 1.0 for keep.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor | None, int, int]:
+                - chunked_tensor (torch.Tensor): Reshaped tensor.
+                                                 Shape: (batch_size, num_chunks, self.chunk_size, d_model).
+                - chunked_mask (torch.Tensor | None): Reshaped mask or None.
+                                                      Shape: (batch_size, num_chunks, 1, self.chunk_size).
+                - padding_needed (int): Amount of padding added to the sequence length.
+                - original_seq_len (int): Sequence length before padding.
+        """
         batch_size, original_seq_len, d_model = input_tensor.shape
         
         padding_needed = 0
@@ -191,36 +212,52 @@ class AHCAttention(nn.Module):
                 UserWarning
             )
 
-        # Process the input padding mask using the static utility method
+        # 0. Prepare input_padding_mask (if provided)
+        # Input input_padding_mask shape: (B, S_orig) boolean/float or (B, 1, 1, S_orig) float
         processed_input_mask_for_chunking = AHCAttention._process_input_mask(
             mask=input_padding_mask,
             target_seq_len=original_seq_len,
             device=device,
             target_dtype=torch.float # MHA expects float mask (0 for mask, 1 for keep)
         )
+        # Output processed_input_mask_for_chunking shape: (B, 1, 1, S_orig) float or None
 
+        # 1. Chunking Input Tensor and Mask
+        # Input query shape: (batch_size, original_seq_len, d_model)
         chunked_query, chunked_padding_mask_for_local_mha, padding_needed, _ = \
             self._chunk_input(query, processed_input_mask_for_chunking)
+        # Output chunked_query shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
+        # Output chunked_padding_mask_for_local_mha shape: (batch_size, current_num_chunks, 1, self.chunk_size) or None
         current_num_chunks = chunked_query.shape[1]
 
+        # 2. Local Attention within Chunks
+        # Input local_mha_input shape: (batch_size * current_num_chunks, self.chunk_size, self.d_model)
         local_mha_input = chunked_query.contiguous().view(-1, self.chunk_size, d_model)
         
         sz_c = self.chunk_size
+        # Base causal mask for local attention (1, 1, C, C), 1s for keep, 0s for mask
         causal_mask_for_local_attn = torch.tril(torch.ones(sz_c, sz_c, device=device, dtype=torch.float)).unsqueeze(0).unsqueeze(0)
 
         final_local_mask = causal_mask_for_local_attn 
         if chunked_padding_mask_for_local_mha is not None:
+            # chunked_padding_mask_for_local_mha is (B, N, 1, C). Values are 0.0 for pad, 1.0 for keep.
+            # Reshape to (B*N, 1, 1, C) for MHA.
             prepared_padding_mask = chunked_padding_mask_for_local_mha.contiguous().view(
                 batch_size * current_num_chunks, 1, 1, sz_c
             )
+            # Combine: if either mask is 0 (mask), the result is 0 (mask).
             final_local_mask = causal_mask_for_local_attn * prepared_padding_mask
+        # Input final_local_mask shape: (B*N, 1, 1, C) or (1, 1, C, C)
             
         local_context_flat, _ = self.local_mha(
             local_mha_input, local_mha_input, local_mha_input, mask=final_local_mask
         )
+        # Output local_context_flat shape: (batch_size * current_num_chunks, self.chunk_size, self.d_model)
         local_context = local_context_flat.view(batch_size, current_num_chunks, self.chunk_size, d_model)
+        # Output local_context shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
 
         # 3. Summarization
+        # Input local_context shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
         summary_tokens = None
         summarization_type = self.summarization_method_config.get('type')
         if summarization_type == "S1_pool":
@@ -231,21 +268,17 @@ class AHCAttention(nn.Module):
              raise ValueError("Summarization type not specified in summarization_method_config.")
         else: 
             raise ValueError(f"Unsupported summarization type: {summarization_type}")
-        # summary_tokens shape: (B, N, D)
+        # Output summary_tokens shape: (batch_size, current_num_chunks, self.d_model)
 
         # 4. Global Attention
-        # --- START: New/Modified logic for P0.1 ---
+        # Input summary_tokens shape: (batch_size, current_num_chunks, self.d_model)
         summary_validity_mask = None
         if chunked_padding_mask_for_local_mha is not None:
-            # chunked_padding_mask_for_local_mha shape is (B, N, 1, C), 1.0 for keep, 0.0 for pad
-            # Squeeze out the dim of size 1: (B, N, C)
-            squeezed_chunk_padding_mask = chunked_padding_mask_for_local_mha.squeeze(2)
-            # A summary is valid if any token in its source chunk was not padding (value != 0.0)
-            summary_validity_mask = torch.any(squeezed_chunk_padding_mask != 0.0, dim=-1) # Result (B, N) boolean
-            summary_validity_mask = summary_validity_mask.float() # Convert to float (0.0 or 1.0)
+            squeezed_chunk_padding_mask = chunked_padding_mask_for_local_mha.squeeze(2) # (B, N, C)
+            summary_validity_mask = torch.any(squeezed_chunk_padding_mask != 0.0, dim=-1).float() # (B, N)
         else:
-            # If no input mask, all summaries are considered valid from a padding perspective
             summary_validity_mask = torch.ones(batch_size, current_num_chunks, device=device, dtype=torch.float)
+        # summary_validity_mask shape: (batch_size, current_num_chunks)
         
         global_context_summaries = None
         global_attention_type = self.global_attention_method_config.get('type')
@@ -254,35 +287,30 @@ class AHCAttention(nn.Module):
             if summary_tokens is None:
                 raise ValueError("Summary tokens are None, cannot apply global attention.")
             
-            num_summary_tokens = summary_tokens.shape[1] # This is current_num_chunks
+            num_summary_tokens = summary_tokens.shape[1] 
 
-            # Base global causal mask (1.0 for keep) - ensure it's float
             global_causal_mask = torch.tril(torch.ones(num_summary_tokens, num_summary_tokens, device=device, dtype=torch.float)).unsqueeze(0).unsqueeze(0)
-
-            # Prepare summary_validity_mask for broadcasting to MHA key mask: (B, 1, 1, N_keys)
-            prepared_summary_validity_mask = summary_validity_mask.unsqueeze(1).unsqueeze(2) # Shape: (B, 1, 1, N)
-
-            # Combine causal mask with summary validity mask
-            # Both masks use 1.0 for keep, 0.0 for mask. Product achieves "AND" logic.
+            prepared_summary_validity_mask = summary_validity_mask.unsqueeze(1).unsqueeze(2) # (B, 1, 1, N)
             final_global_mask = global_causal_mask * prepared_summary_validity_mask 
+            # final_global_mask shape: (B, 1, N, N) or (1, 1, N, N) * (B, 1, 1, N) -> (B, 1, N, N) (broadcasted)
 
             global_context_summaries, _ = self.global_mha(summary_tokens, summary_tokens, summary_tokens, mask=final_global_mask)
-        elif global_attention_type is None: # No global attention configured, pass through summary tokens
+        elif global_attention_type is None: 
             if summary_tokens is None:
                  raise ValueError("Summary tokens are None, and no global attention is configured to pass them through.")
             global_context_summaries = summary_tokens
-        elif global_attention_type == "G1_full_mha" and not self.global_mha: # Should be caught by __init__
+        elif global_attention_type == "G1_full_mha" and not self.global_mha: 
              raise ValueError("G1_full_mha global attention configured but module not initialized.")
-        else: # Other specified but not implemented global attention types
+        else: 
             if summary_tokens is None:
                  raise ValueError(f"Global attention type {global_attention_type} requires summary tokens, but they are None.")
-            # This case should ideally be caught by __init__ if type is not supported
             print(f"Warning: Global attention type '{global_attention_type}' logic not fully implemented or not G1. Passing summary_tokens.")
             global_context_summaries = summary_tokens
-        # --- END: New/Modified logic for P0.1 ---
-        # global_context_summaries shape: (B, N, D)
+        # Output global_context_summaries shape: (batch_size, current_num_chunks, self.d_model)
         
         # 5. Combination
+        # Input local_context shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
+        # Input global_context_summaries shape: (batch_size, current_num_chunks, self.d_model)
         combined_context_chunked = None
         combination_type = self.combination_method_config.get('type')
         if combination_type == "C1_broadcast_add":
@@ -295,10 +323,14 @@ class AHCAttention(nn.Module):
             raise ValueError("Combination type not specified in combination_method_config.")
         else:
             raise ValueError(f"Unsupported combination type: {combination_type}")
+        # Output combined_context_chunked shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
 
+        # 6. Reshape to final output dimensions
         output_tensor = combined_context_chunked.contiguous().view(batch_size, -1, d_model)
+        # Output output_tensor (before unpadding) shape: (batch_size, current_num_chunks * self.chunk_size, self.d_model)
         
         if padding_needed > 0:
             output_tensor = output_tensor[:, :original_seq_len, :]
+        # Final output_tensor shape: (batch_size, original_seq_len, self.d_model)
         
         return output_tensor, None
