@@ -59,40 +59,72 @@ class AHCAttention(nn.Module):
 
     @staticmethod
     def _process_input_mask(mask: torch.Tensor, target_seq_len: int, device: torch.device, target_dtype: torch.dtype = torch.float) -> torch.Tensor:
+        """
+        Processes an input attention mask into a canonical format suitable for chunking.
+
+        This utility converts common padding mask formats (2D or a specific 4D)
+        into a standard 4D tensor shape (batch_size, 1, 1, seq_len) with a float dtype,
+        where 1.0 means keep and 0.0 means pad. This format is expected by the 
+        _chunk_input method for masks.
+
+        Args:
+            mask (torch.Tensor, optional): The input attention mask. Supported shapes:
+                - None: Returns None.
+                - 2D (batch_size, seq_len): Boolean or float/int. True/1 indicates keep.
+                - 4D (batch_size, 1, 1, seq_len): Float. 1.0 indicates keep.
+            target_seq_len (int): The expected sequence length for the output mask,
+                                  typically from the main input tensor (e.g., query).
+            device (torch.device): The target device for the output mask.
+            target_dtype (torch.dtype, optional): The target data type for the output mask.
+                                                 Defaults to torch.float.
+
+        Returns:
+            torch.Tensor, optional: The processed mask in shape (batch_size, 1, 1, seq_len)
+                                    and target_dtype, or None if the input mask was None.
+
+        Raises:
+            ValueError: If the input mask has an unsupported dimension or its sequence
+                        length (if 2D) does not match target_seq_len.
+                        Also raises ValueError for 4D masks not in the expected
+                        (B, 1, 1, S) format, as this function is specialized for
+                        creating chunkable padding masks, not for general 4D MHA mask transformations.
+        """
         if mask is None:
             return None
 
+        # Ensure mask is float (0.0 for pad, 1.0 for keep) before shape manipulation
         if mask.dtype == torch.bool:
-            mask = mask.type(target_dtype) # Convert boolean to float (True->1.0, False->0.0)
-        
+            mask = mask.type(target_dtype)  # True -> 1.0, False -> 0.0
+        elif mask.dtype != target_dtype: # If already float but not target_dtype (e.g. float64)
+            mask = mask.type(target_dtype)
+
         if mask.ndim == 2:
             # Input: (batch_size, seq_len)
-            # Output: (batch_size, 1, 1, seq_len)
             if mask.shape[1] != target_seq_len:
-                raise ValueError(f"Mask sequence length ({mask.shape[1]}) does not match target sequence length ({target_seq_len}).")
+                raise ValueError(
+                    f"Input 2D mask's sequence length ({mask.shape[1]}) does not match "
+                    f"target sequence length ({target_seq_len})."
+                )
+            # Reshape to (batch_size, 1, 1, seq_len)
             processed_mask = mask.unsqueeze(1).unsqueeze(2)
         elif mask.ndim == 4:
-            # Input: (batch_size, num_heads, query_len, key_len) or (batch_size, 1, 1, seq_len)
-            # We want to ensure it's (batch_size, 1, 1, seq_len) for consistent input to chunking
+            # Expected input: (batch_size, 1, 1, seq_len)
             if mask.shape[1] == 1 and mask.shape[2] == 1 and mask.shape[3] == target_seq_len:
                 processed_mask = mask
-            elif mask.shape[1] > 1 : # Likely (B, H, Q, K)
-                 raise ValueError(
-                    f"4D mask has shape {mask.shape}, which cannot be unambiguously converted to a simple (B,1,1,S) padding mask. "
-                    "If this is a head-specific mask, it needs custom handling not covered by _process_input_mask."
+            else:
+                # This utility is specifically for preparing a simple padding mask for chunking.
+                # It does not handle more complex 4D MHA masks (e.g., B,H,Q,K or B,1,Q,K where Q!=1).
+                raise ValueError(
+                    f"Input 4D mask has shape {mask.shape}. Expected (batch_size, 1, 1, {target_seq_len}) "
+                    f"for this utility. Other 4D mask formats require custom handling."
                 )
-            elif mask.shape[2] != 1 or mask.shape[1] !=1 : # e.g. (B,1,S,S)
-                 raise ValueError(
-                    f"4D mask has shape {mask.shape}. For padding, expected (B,1,1,S) or for _process_input_mask to simplify it to that."
-                 )
-            else: # (B,1,1,S) - should be caught by the first condition in this elif block
-                processed_mask = mask
         else:
-            raise ValueError(f"Unsupported mask dimension: {mask.ndim}. Expected 2D (B,S) or 4D (B,1,1,S).")
+            raise ValueError(
+                f"Unsupported mask dimension: {mask.ndim}. Expected 2D (batch_size, seq_len) "
+                f"or 4D (batch_size, 1, 1, seq_len)."
+            )
 
-        # Ensure correct dtype and device
-        if processed_mask.dtype != target_dtype:
-            processed_mask = processed_mask.type(target_dtype)
+        # Ensure correct device
         if processed_mask.device != device:
             processed_mask = processed_mask.to(device)
             
