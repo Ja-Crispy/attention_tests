@@ -153,30 +153,30 @@ class TransformerEncoder(nn.Module):
         elif attention_type == "AHC":
             from .attention.ahc_attention import AHCAttention # Dynamic import
             
-            # Prepare parameters for AHCAttention
-            # d_model is passed directly.
-            # Other AHC-specific parameters (n_heads, chunk_size, configs for summarization, global, combination)
-            # should be within attention_config.
-            # The AHCAttention module itself will handle defaults if specific sub-configs are missing.
+            ahc_constructor_params = {k: v for k, v in attention_config.items() if k != 'type'}
             
-            ahc_constructor_params = attention_config.copy() # Create a copy to modify
-            ahc_constructor_params.pop("type") # Remove 'type' as it's not an AHCAttention constructor arg
-            
-            # Ensure d_model is passed from TransformerEncoder's d_model
-            ahc_constructor_params["d_model"] = d_model 
-            # Ensure dropout_rate is passed, defaulting to TransformerEncoder's dropout_rate
-            # AHCAttention's __init__ expects 'dropout_rate', not 'dropout' from config.
-            ahc_constructor_params.setdefault("dropout_rate", dropout_rate)
+            # Validate required AHC parameters
+            required_ahc_keys = {'n_heads', 'chunk_size', 'summarization_method_config', 'global_attention_method_config', 'combination_method_config'}
+            missing_keys = required_ahc_keys - set(ahc_constructor_params.keys())
+            if missing_keys:
+                raise ValueError(f"AHC configuration is missing required keys: {missing_keys}. Provided config: {attention_config}")
 
-            # n_heads for AHC is also expected inside attention_config directly (used for local MHA in AHC)
-            if "n_heads" not in ahc_constructor_params:
-                 raise ValueError("n_heads is required in attention_config for AHCAttention")
+            # Further validation for nested configs
+            for key in ['summarization_method_config', 'global_attention_method_config', 'combination_method_config']:
+                if not isinstance(ahc_constructor_params.get(key), dict):
+                    raise ValueError(f"AHC config's '{key}' must be a dictionary. Provided: {ahc_constructor_params.get(key)}")
+                if not ahc_constructor_params[key].get('type'):
+                     raise ValueError(f"AHC config's '{key}' must have a 'type' specified. Provided: {ahc_constructor_params[key]}")
 
-            # Other required AHC params (like chunk_size, summarization_method_config, etc.)
-            # are expected to be in ahc_constructor_params (copied from attention_config).
-            # AHCAttention's __init__ will raise errors if they are missing.
+            # Set default dropout_rate for AHCAttention if not specified in its config section
+            # AHCAttention's constructor expects 'dropout_rate'.
+            ahc_constructor_params.setdefault('dropout_rate', dropout_rate) # Use TransformerEncoder's dropout_rate as default
 
-            attention_module = AHCAttention(**ahc_constructor_params)
+            # d_model is passed directly to AHCAttention, not as part of ahc_constructor_params from config
+            attention_module = AHCAttention(
+                d_model=d_model, 
+                **ahc_constructor_params
+            )
         else:
             raise ValueError(f"Unsupported attention type: {attention_type}")
 
