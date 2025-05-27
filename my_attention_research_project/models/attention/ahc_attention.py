@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F # Added import for F.pad
+import warnings # Added for chunk_size validation warning
 from .vanilla_mha import MultiHeadAttention # Used for local and potentially global attention
 
 class AHCAttention(nn.Module):
@@ -22,6 +23,14 @@ class AHCAttention(nn.Module):
         self.combination_method_config = combination_method_config
         self.dropout_rate = dropout_rate
         self.additional_config = kwargs
+
+        # Validate chunk_size at initialization
+        if self.chunk_size <= 0:
+            raise ValueError("AHCAttention chunk_size must be positive.")
+        # Optional: if model_max_length is passed and validated here (e.g. from TransformerEncoder)
+        # model_max_length = kwargs.get('model_max_length')
+        # if model_max_length and self.chunk_size > model_max_length:
+        #     raise ValueError(f"AHCAttention chunk_size ({self.chunk_size}) > model_max_length ({model_max_length})")
 
         self.local_mha = MultiHeadAttention(
             d_model=self.d_model,
@@ -47,6 +56,47 @@ class AHCAttention(nn.Module):
             if not hasattr(self, '_summarize_s1_pool'):
                 raise AttributeError("S2_linear_on_pool requires S1_pool's pooling logic. Ensure _summarize_s1_pool is defined.")
             self.s2_linear_projection = nn.Linear(self.d_model, self.d_model)
+
+    @staticmethod
+    def _process_input_mask(mask: torch.Tensor, target_seq_len: int, device: torch.device, target_dtype: torch.dtype = torch.float) -> torch.Tensor:
+        if mask is None:
+            return None
+
+        if mask.dtype == torch.bool:
+            mask = mask.type(target_dtype) # Convert boolean to float (True->1.0, False->0.0)
+        
+        if mask.ndim == 2:
+            # Input: (batch_size, seq_len)
+            # Output: (batch_size, 1, 1, seq_len)
+            if mask.shape[1] != target_seq_len:
+                raise ValueError(f"Mask sequence length ({mask.shape[1]}) does not match target sequence length ({target_seq_len}).")
+            processed_mask = mask.unsqueeze(1).unsqueeze(2)
+        elif mask.ndim == 4:
+            # Input: (batch_size, num_heads, query_len, key_len) or (batch_size, 1, 1, seq_len)
+            # We want to ensure it's (batch_size, 1, 1, seq_len) for consistent input to chunking
+            if mask.shape[1] == 1 and mask.shape[2] == 1 and mask.shape[3] == target_seq_len:
+                processed_mask = mask
+            elif mask.shape[1] > 1 : # Likely (B, H, Q, K)
+                 raise ValueError(
+                    f"4D mask has shape {mask.shape}, which cannot be unambiguously converted to a simple (B,1,1,S) padding mask. "
+                    "If this is a head-specific mask, it needs custom handling not covered by _process_input_mask."
+                )
+            elif mask.shape[2] != 1 or mask.shape[1] !=1 : # e.g. (B,1,S,S)
+                 raise ValueError(
+                    f"4D mask has shape {mask.shape}. For padding, expected (B,1,1,S) or for _process_input_mask to simplify it to that."
+                 )
+            else: # (B,1,1,S) - should be caught by the first condition in this elif block
+                processed_mask = mask
+        else:
+            raise ValueError(f"Unsupported mask dimension: {mask.ndim}. Expected 2D (B,S) or 4D (B,1,1,S).")
+
+        # Ensure correct dtype and device
+        if processed_mask.dtype != target_dtype:
+            processed_mask = processed_mask.type(target_dtype)
+        if processed_mask.device != device:
+            processed_mask = processed_mask.to(device)
+            
+        return processed_mask
 
     def _combine_c1_broadcast_add(self, local_context: torch.Tensor, global_context_summaries: torch.Tensor) -> torch.Tensor:
         expanded_global_context = global_context_summaries.unsqueeze(2).expand(-1, -1, self.chunk_size, -1)
@@ -99,14 +149,23 @@ class AHCAttention(nn.Module):
         batch_size, original_seq_len, d_model = query.shape
         device = query.device
 
-        processed_input_mask_for_chunking = None
-        if input_padding_mask is not None:
-            if input_padding_mask.ndim == 2:
-                processed_input_mask_for_chunking = input_padding_mask.float().unsqueeze(1).unsqueeze(2)
-            elif input_padding_mask.ndim == 4:
-                processed_input_mask_for_chunking = input_padding_mask.float()
-            else:
-                raise ValueError(f"Unsupported input_padding_mask shape: {input_padding_mask.shape}")
+        # Runtime check for chunk_size vs input sequence length
+        if self.chunk_size <= 0: # Should have been caught in __init__, but for safety.
+            raise ValueError("AHCAttention.chunk_size must be positive (runtime check).")
+        if self.chunk_size > original_seq_len:
+            warnings.warn(
+                f"AHCAttention: chunk_size ({self.chunk_size}) is greater than input sequence length ({original_seq_len}). "
+                f"Input will be processed as a single chunk with padding.",
+                UserWarning
+            )
+
+        # Process the input padding mask using the static utility method
+        processed_input_mask_for_chunking = AHCAttention._process_input_mask(
+            mask=input_padding_mask,
+            target_seq_len=original_seq_len,
+            device=device,
+            target_dtype=torch.float # MHA expects float mask (0 for mask, 1 for keep)
+        )
 
         chunked_query, chunked_padding_mask_for_local_mha, padding_needed, _ = \
             self._chunk_input(query, processed_input_mask_for_chunking)
@@ -129,6 +188,7 @@ class AHCAttention(nn.Module):
         )
         local_context = local_context_flat.view(batch_size, current_num_chunks, self.chunk_size, d_model)
 
+        # 3. Summarization
         summary_tokens = None
         summarization_type = self.summarization_method_config.get('type')
         if summarization_type == "S1_pool":
@@ -139,29 +199,58 @@ class AHCAttention(nn.Module):
              raise ValueError("Summarization type not specified in summarization_method_config.")
         else: 
             raise ValueError(f"Unsupported summarization type: {summarization_type}")
+        # summary_tokens shape: (B, N, D)
 
+        # 4. Global Attention
+        # --- START: New/Modified logic for P0.1 ---
+        summary_validity_mask = None
+        if chunked_padding_mask_for_local_mha is not None:
+            # chunked_padding_mask_for_local_mha shape is (B, N, 1, C), 1.0 for keep, 0.0 for pad
+            # Squeeze out the dim of size 1: (B, N, C)
+            squeezed_chunk_padding_mask = chunked_padding_mask_for_local_mha.squeeze(2)
+            # A summary is valid if any token in its source chunk was not padding (value != 0.0)
+            summary_validity_mask = torch.any(squeezed_chunk_padding_mask != 0.0, dim=-1) # Result (B, N) boolean
+            summary_validity_mask = summary_validity_mask.float() # Convert to float (0.0 or 1.0)
+        else:
+            # If no input mask, all summaries are considered valid from a padding perspective
+            summary_validity_mask = torch.ones(batch_size, current_num_chunks, device=device, dtype=torch.float)
+        
         global_context_summaries = None
         global_attention_type = self.global_attention_method_config.get('type')
 
         if self.global_mha and global_attention_type == "G1_full_mha":
-            if summary_tokens is None: 
-                raise ValueError("Summary tokens are None, cannot apply G1_full_mha global attention.")
-            
-            num_summary_tokens = summary_tokens.shape[1] 
-            global_causal_mask = torch.tril(torch.ones(num_summary_tokens, num_summary_tokens, device=device)).unsqueeze(0).unsqueeze(0)
-            global_context_summaries, _ = self.global_mha(summary_tokens, summary_tokens, summary_tokens, mask=global_causal_mask)
-        elif global_attention_type is None: 
             if summary_tokens is None:
-                raise ValueError("Summary tokens are None, and no global attention is configured to pass them through.")
-            global_context_summaries = summary_tokens 
-        elif global_attention_type == "G1_full_mha" and not self.global_mha:
+                raise ValueError("Summary tokens are None, cannot apply global attention.")
+            
+            num_summary_tokens = summary_tokens.shape[1] # This is current_num_chunks
+
+            # Base global causal mask (1.0 for keep) - ensure it's float
+            global_causal_mask = torch.tril(torch.ones(num_summary_tokens, num_summary_tokens, device=device, dtype=torch.float)).unsqueeze(0).unsqueeze(0)
+
+            # Prepare summary_validity_mask for broadcasting to MHA key mask: (B, 1, 1, N_keys)
+            prepared_summary_validity_mask = summary_validity_mask.unsqueeze(1).unsqueeze(2) # Shape: (B, 1, 1, N)
+
+            # Combine causal mask with summary validity mask
+            # Both masks use 1.0 for keep, 0.0 for mask. Product achieves "AND" logic.
+            final_global_mask = global_causal_mask * prepared_summary_validity_mask 
+
+            global_context_summaries, _ = self.global_mha(summary_tokens, summary_tokens, summary_tokens, mask=final_global_mask)
+        elif global_attention_type is None: # No global attention configured, pass through summary tokens
+            if summary_tokens is None:
+                 raise ValueError("Summary tokens are None, and no global attention is configured to pass them through.")
+            global_context_summaries = summary_tokens
+        elif global_attention_type == "G1_full_mha" and not self.global_mha: # Should be caught by __init__
              raise ValueError("G1_full_mha global attention configured but module not initialized.")
-        else: 
+        else: # Other specified but not implemented global attention types
             if summary_tokens is None:
                  raise ValueError(f"Global attention type {global_attention_type} requires summary tokens, but they are None.")
+            # This case should ideally be caught by __init__ if type is not supported
             print(f"Warning: Global attention type '{global_attention_type}' logic not fully implemented or not G1. Passing summary_tokens.")
             global_context_summaries = summary_tokens
-
+        # --- END: New/Modified logic for P0.1 ---
+        # global_context_summaries shape: (B, N, D)
+        
+        # 5. Combination
         combined_context_chunked = None
         combination_type = self.combination_method_config.get('type')
         if combination_type == "C1_broadcast_add":

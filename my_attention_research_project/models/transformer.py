@@ -134,16 +134,22 @@ class TransformerEncoder(nn.Module):
 
         # Dynamically instantiate attention module
         attention_type = attention_config.get("type", "VanillaMHA")
+        attention_module = None # Initialize local variable
         
         if attention_type == "VanillaMHA":
-            from .attention.vanilla_mha import MultiHeadAttention # Dynamic import
-            # Ensure n_heads is present in attention_config for VanillaMHA
+            try:
+                from .attention.vanilla_mha import MultiHeadAttention # Dynamic import
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import MultiHeadAttention for attention_type 'VanillaMHA'. "
+                    f"Ensure 'vanilla_mha.py' exists and is error-free. Original error: {e}"
+                )
+            
             if "n_heads" not in attention_config:
                 raise ValueError("n_heads is required in attention_config for VanillaMHA")
             
-            # Parameters for MultiHeadAttention
             mha_n_heads = attention_config["n_heads"]
-            mha_dropout_rate = attention_config.get("dropout_rate", dropout_rate) # Use global dropout_rate as fallback
+            mha_dropout_rate = attention_config.get("dropout_rate", dropout_rate)
 
             attention_module = MultiHeadAttention(
                 d_model=d_model,
@@ -151,34 +157,53 @@ class TransformerEncoder(nn.Module):
                 dropout_rate=mha_dropout_rate
             )
         elif attention_type == "AHC":
-            from .attention.ahc_attention import AHCAttention # Dynamic import
+            try:
+                from .attention.ahc_attention import AHCAttention # Dynamic import
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import AHCAttention for attention_type 'AHC'. "
+                    f"Ensure 'ahc_attention.py' exists and is error-free. Original error: {e}"
+                )
             
             ahc_constructor_params = {k: v for k, v in attention_config.items() if k != 'type'}
             
-            # Validate required AHC parameters
             required_ahc_keys = {'n_heads', 'chunk_size', 'summarization_method_config', 'global_attention_method_config', 'combination_method_config'}
             missing_keys = required_ahc_keys - set(ahc_constructor_params.keys())
             if missing_keys:
                 raise ValueError(f"AHC configuration is missing required keys: {missing_keys}. Provided config: {attention_config}")
 
-            # Further validation for nested configs
+            # Further validation for nested configs (structure and 'type' key)
             for key in ['summarization_method_config', 'global_attention_method_config', 'combination_method_config']:
-                if not isinstance(ahc_constructor_params.get(key), dict):
-                    raise ValueError(f"AHC config's '{key}' must be a dictionary. Provided: {ahc_constructor_params.get(key)}")
-                if not ahc_constructor_params[key].get('type'):
-                     raise ValueError(f"AHC config's '{key}' must have a 'type' specified. Provided: {ahc_constructor_params[key]}")
+                config_dict = ahc_constructor_params[key] # Access directly as it's a required key
+                if not isinstance(config_dict, dict):
+                    raise ValueError(f"AHC config's '{key}' must be a dictionary. Provided: {config_dict}")
+                if 'type' not in config_dict: # Check for 'type' key within the nested dict
+                     raise ValueError(f"AHC config's '{key}' must have a 'type' specified. Provided: {config_dict}")
 
-            # Set default dropout_rate for AHCAttention if not specified in its config section
-            # AHCAttention's constructor expects 'dropout_rate'.
-            ahc_constructor_params.setdefault('dropout_rate', dropout_rate) # Use TransformerEncoder's dropout_rate as default
+            configured_chunk_size = ahc_constructor_params.get('chunk_size')
+            if not isinstance(configured_chunk_size, int):
+                raise ValueError(f"AHC config: 'chunk_size' must be an integer. Got {configured_chunk_size}")
+            if configured_chunk_size <= 0:
+                raise ValueError(f"AHC config: 'chunk_size' must be positive. Got {configured_chunk_size}")
+            
+            model_max_len = self.positional_encoding.max_len 
+            if configured_chunk_size > model_max_len:
+                raise ValueError(
+                    f"AHC config: chunk_size ({configured_chunk_size}) "
+                    f"cannot be greater than model's pos_encoding_max_len ({model_max_len})."
+                )
+            
+            ahc_constructor_params.setdefault('dropout_rate', dropout_rate)
 
-            # d_model is passed directly to AHCAttention, not as part of ahc_constructor_params from config
             attention_module = AHCAttention(
                 d_model=d_model, 
                 **ahc_constructor_params
             )
         else:
-            raise ValueError(f"Unsupported attention type: {attention_type}")
+            raise ValueError(f"Unsupported attention_type in config: '{attention_type}'")
+
+        if attention_module is None: # Should not happen if logic is correct, but as a safeguard
+            raise RuntimeError(f"Attention module was not instantiated for attention_type: {attention_type}")
 
         feed_forward_module = PositionwiseFeedForward(d_model, d_ff, dropout_rate=dropout_rate)
 
