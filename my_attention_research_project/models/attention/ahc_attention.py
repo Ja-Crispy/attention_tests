@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F # Added import for F.pad
-import warnings # Added for chunk_size validation warning
+# import warnings # Removed as no longer used after changing the warning to an error
 from .vanilla_mha import MultiHeadAttention # Used for local and potentially global attention
+from .combination_strategies import get_combination_strategy # Added for combination strategy
 
 class AHCAttention(nn.Module):
     def __init__(self,
@@ -31,6 +32,44 @@ class AHCAttention(nn.Module):
         # model_max_length = kwargs.get('model_max_length')
         # if model_max_length and self.chunk_size > model_max_length:
         #     raise ValueError(f"AHCAttention chunk_size ({self.chunk_size}) > model_max_length ({model_max_length})")
+
+        # --- Configuration Validation ---
+        # 1. Summarization Method Config
+        summarization_type = self.summarization_method_config.get('type')
+        allowed_summarization_types = ["S1_pool", "S2_linear_on_pool", None]
+        if summarization_type not in allowed_summarization_types:
+            raise ValueError(
+                f"Invalid summarization_method_config['type']: {summarization_type}. "
+                f"Must be one of {allowed_summarization_types}."
+            )
+        if summarization_type in ["S1_pool", "S2_linear_on_pool"]:
+            pool_type = self.summarization_method_config.get('pool_type')
+            allowed_pool_types = ["mean", "max"]
+            if pool_type is None:
+                raise ValueError(
+                    f"summarization_method_config['pool_type'] must be specified for type '{summarization_type}'."
+                )
+            if pool_type not in allowed_pool_types:
+                raise ValueError(
+                    f"Invalid summarization_method_config['pool_type']: {pool_type}. "
+                    f"Must be one of {allowed_pool_types} for type '{summarization_type}'."
+                )
+
+        # 2. Global Attention Method Config
+        global_attention_type = self.global_attention_method_config.get('type')
+        allowed_global_attention_types = ["G1_full_mha", None]
+        if global_attention_type not in allowed_global_attention_types:
+            # Existing code raises NotImplementedError for unknown types during module init,
+            # but for config validation, ValueError is more consistent.
+            raise ValueError(
+                f"Invalid global_attention_method_config['type']: {global_attention_type}. "
+                f"Must be one of {allowed_global_attention_types}."
+            )
+
+        # 3. Combination Method Config
+        # Validation is now handled by the factory, but we still need to initialize the strategy
+        self.combination_strategy = get_combination_strategy(self.combination_method_config)
+        # --- End Configuration Validation ---
 
         self.local_mha = MultiHeadAttention(
             d_model=self.d_model,
@@ -130,10 +169,11 @@ class AHCAttention(nn.Module):
             
         return processed_mask
 
-    def _combine_c1_broadcast_add(self, local_context: torch.Tensor, global_context_summaries: torch.Tensor) -> torch.Tensor:
-        expanded_global_context = global_context_summaries.unsqueeze(2).expand(-1, -1, self.chunk_size, -1)
-        combined_context = local_context + expanded_global_context
-        return combined_context
+    # Removed _combine_c1_broadcast_add as its logic is now in C1BroadcastAddCombinationStrategy
+    # def _combine_c1_broadcast_add(self, local_context: torch.Tensor, global_context_summaries: torch.Tensor) -> torch.Tensor:
+    #     expanded_global_context = global_context_summaries.unsqueeze(2).expand(-1, -1, self.chunk_size, -1)
+    #     combined_context = local_context + expanded_global_context
+    #     return combined_context
 
     def _summarize_s1_pool(self, local_context: torch.Tensor, summarization_config: dict) -> torch.Tensor:
         pool_type = summarization_config.get('pool_type', 'mean')
@@ -206,10 +246,8 @@ class AHCAttention(nn.Module):
         if self.chunk_size <= 0: # Should have been caught in __init__, but for safety.
             raise ValueError("AHCAttention.chunk_size must be positive (runtime check).")
         if self.chunk_size > original_seq_len:
-            warnings.warn(
-                f"AHCAttention: chunk_size ({self.chunk_size}) is greater than input sequence length ({original_seq_len}). "
-                f"Input will be processed as a single chunk with padding.",
-                UserWarning
+            raise ValueError(
+                f"AHCAttention: chunk_size ({self.chunk_size}) cannot be greater than input sequence length ({original_seq_len})."
             )
 
         # 0. Prepare input_padding_mask (if provided)
@@ -224,7 +262,9 @@ class AHCAttention(nn.Module):
 
         # 1. Chunking Input Tensor and Mask
         # Input query shape: (batch_size, original_seq_len, d_model)
-        chunked_query, chunked_padding_mask_for_local_mha, padding_needed, _ = \
+        # The original_seq_len from query.shape is the one to be reported.
+        # _chunk_input also returns original_seq_len as its 4th output, which matches query.shape[1].
+        chunked_query, chunked_padding_mask_for_local_mha, padding_needed, _original_seq_len_from_chunking = \
             self._chunk_input(query, processed_input_mask_for_chunking)
         # Output chunked_query shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
         # Output chunked_padding_mask_for_local_mha shape: (batch_size, current_num_chunks, 1, self.chunk_size) or None
@@ -311,18 +351,16 @@ class AHCAttention(nn.Module):
         # 5. Combination
         # Input local_context shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
         # Input global_context_summaries shape: (batch_size, current_num_chunks, self.d_model)
-        combined_context_chunked = None
-        combination_type = self.combination_method_config.get('type')
-        if combination_type == "C1_broadcast_add":
-            if global_context_summaries is None:
-                 raise ValueError("Global context summaries are None, cannot apply C1_broadcast_add combination.")
-            if local_context is None: 
-                 raise ValueError("Local context is None, cannot apply C1_broadcast_add combination.")
-            combined_context_chunked = self._combine_c1_broadcast_add(local_context, global_context_summaries)
-        elif combination_type is None:
-            raise ValueError("Combination type not specified in combination_method_config.")
-        else:
-            raise ValueError(f"Unsupported combination type: {combination_type}")
+        
+        # The factory get_combination_strategy raises error if combination_method_config.get('type') is None
+        # and the problem statement implies that if strategy is None, this part of model should be skipped.
+        # However, the current structure always expects a combination strategy to be returned from the factory.
+        # The factory currently raises "Combination strategy type cannot be None..."
+        # If a valid strategy is present, it will be applied.
+        # The check for None local_context or global_context_summaries is added as per instructions.
+        if local_context is None or global_context_summaries is None:
+            raise ValueError("Local context or global context summaries are None, cannot apply combination strategy.")
+        combined_context_chunked = self.combination_strategy.apply(local_context, global_context_summaries, self.chunk_size)
         # Output combined_context_chunked shape: (batch_size, current_num_chunks, self.chunk_size, self.d_model)
 
         # 6. Reshape to final output dimensions
@@ -333,4 +371,8 @@ class AHCAttention(nn.Module):
             output_tensor = output_tensor[:, :original_seq_len, :]
         # Final output_tensor shape: (batch_size, original_seq_len, self.d_model)
         
-        return output_tensor, None
+        padding_info = {
+            "padding_added": padding_needed,
+            "original_sequence_length": original_seq_len # from query.shape at start of forward
+        }
+        return output_tensor, padding_info
