@@ -4,8 +4,7 @@ import copy
 import math # For sqrt if used for scaling embeddings
 
 from .common_layers import PositionalEncoding, PositionwiseFeedForward, TokenEmbedding
-from .attention.vanilla_mha import MultiHeadAttention
-from .attention.ahc_attention import AHCAttention # Import AHCAttention
+# Specific attention modules will be imported dynamically within TransformerEncoder
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -19,9 +18,9 @@ class TransformerEncoderLayer(nn.Module):
     Args:
         d_model (int): The number of expected features in the input (required).
         attention_module (nn.Module): An instance of an attention mechanism
-                                      (e.g., MultiHeadAttention).
+                                     (e.g., MultiHeadAttention).
         feed_forward_module (nn.Module): An instance of a feed-forward network
-                                         (e.g., PositionwiseFeedForward).
+                                          (e.g., PositionwiseFeedForward).
         dropout_rate (float): The dropout value applied to the output of each sub-layer.
     """
     def __init__(self, d_model: int, attention_module: nn.Module, feed_forward_module: nn.Module, dropout_rate: float):
@@ -46,11 +45,11 @@ class TransformerEncoderLayer(nn.Module):
             src (torch.Tensor): The sequence to the encoder layer.
                                 Shape: (batch_size, seq_len, d_model).
             src_mask (torch.Tensor, optional): The mask for the src sequence.
-                                               Its shape depends on the attention mechanism.
-                                               For self-attention in MHA, it's typically
-                                               (batch_size, 1, 1, seq_len) for padding or
-                                               (batch_size, 1, seq_len, seq_len) for combined masks.
-                                               Defaults to None.
+                                             Its shape depends on the attention mechanism.
+                                             For self-attention in MHA, it's typically
+                                             (batch_size, 1, 1, seq_len) for padding or
+                                             (batch_size, 1, seq_len, seq_len) for combined masks.
+                                             Defaults to None.
 
         Returns:
             torch.Tensor: The output of the encoder layer.
@@ -59,7 +58,15 @@ class TransformerEncoderLayer(nn.Module):
         # 1. Attention block (Norm -> Attention -> Dropout -> Residual)
         src_normed = self.norm1(src)
         # Compute attention output. For encoder self-attention, Q, K, V are all from src_normed.
-        att_output, _ = self.attention(query=src_normed, key=src_normed, value=src_normed, mask=src_mask)
+        # The attention module itself should handle if it returns weights or other info.
+        # We primarily need the context vector.
+        att_output_tuple = self.attention(query=src_normed, key=src_normed, value=src_normed, mask=src_mask)
+        
+        if isinstance(att_output_tuple, tuple):
+            att_output = att_output_tuple[0] # Assuming first element is the context vector
+        else:
+            att_output = att_output_tuple # If attention module returns only context vector
+
         src = src + self.dropout(att_output) # Apply dropout to attention output and add residual
 
         # 2. Feed-forward block (Norm -> FFN -> Dropout -> Residual)
@@ -79,25 +86,21 @@ class TransformerEncoder(nn.Module):
         vocab_size (int): Size of the input vocabulary.
         d_model (int): The dimension of the model (embeddings, attention, etc.).
         attention_config (dict): Configuration for the attention module.
+                                 Must include "type" (e.g., "VanillaMHA", "AHC") and
+                                 other type-specific parameters.
         num_encoder_layers (int): Number of stacked TransformerEncoderLayer instances.
         ffn_dim_factor (int, optional): Factor to determine d_ff (d_ff = d_model * ffn_dim_factor).
                                        Defaults to 4.
-        dropout_rate (float, optional): Dropout rate used throughout the model (embeddings, attention, FFN, encoder layers).
-                                       Defaults to 0.1.
-        use_positional_embeddings (bool, optional): Whether to add positional encodings.
-                                                  Defaults to True.
-        pos_encoding_max_len (int, optional): Maximum sequence length for positional encodings.
-                                            Defaults to 5000.
-        embedding_scale_factor (float, optional): Factor to scale token embeddings.
-                                                  If None, no scaling. If set (e.g. math.sqrt(d_model)),
-                                                  embeddings are multiplied by this factor. Defaults to None.
-        embedding_scale_grad_by_freq (bool, optional): Passed to TokenEmbedding for nn.Embedding's
-                                                       `scale_grad_by_freq` argument. Defaults to False.
+        dropout_rate (float, optional): Dropout rate used throughout the model. Defaults to 0.1.
+        use_positional_embeddings (bool, optional): Whether to add positional encodings. Defaults to True.
+        pos_encoding_max_len (int, optional): Max sequence length for positional encodings. Defaults to 5000.
+        embedding_scale_factor (float, optional): Factor to scale token embeddings. Defaults to None.
+        embedding_scale_grad_by_freq (bool, optional): Passed to TokenEmbedding. Defaults to False.
     """
     def __init__(self,
                  vocab_size: int,
                  d_model: int,
-                 attention_config: dict, # Added attention_config
+                 attention_config: dict,
                  num_encoder_layers: int,
                  ffn_dim_factor: int = 4,
                  dropout_rate: float = 0.1,
@@ -119,11 +122,10 @@ class TransformerEncoder(nn.Module):
         )
 
         # 2. Positional Encoding Layer
-        # PositionalEncoding applies dropout internally after adding PE to the embeddings.
         self.positional_encoding = PositionalEncoding(
             d_model, 
             pos_encoding_max_len, 
-            dropout_rate # Dropout here is applied by PositionalEncoding itself
+            dropout_rate # PositionalEncoding applies dropout internally
         )
         
         # 3. Additional Dropout after embedding + PE
@@ -133,67 +135,98 @@ class TransformerEncoder(nn.Module):
         d_ff = d_model * ffn_dim_factor
 
         # Dynamically instantiate attention module
-        attention_type = attention_config.get("type", "VanillaMHA")
+        attention_type = attention_config.get("type", "VanillaMHA") # Default to VanillaMHA if not specified
+        attention_module_instance = None # Initialize local variable
+        
         if attention_type == "VanillaMHA":
-            # Ensure n_heads is present in attention_config for VanillaMHA
+            try:
+                from .attention.vanilla_mha import MultiHeadAttention # Dynamic import
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import MultiHeadAttention for attention_type 'VanillaMHA'. "
+                    f"Ensure 'vanilla_mha.py' exists and is error-free. Original error: {e}"
+                )
+            
             if "n_heads" not in attention_config:
                 raise ValueError("n_heads is required in attention_config for VanillaMHA")
-            attention_module = MultiHeadAttention(
+            
+            mha_n_heads = attention_config["n_heads"]
+            # Use overall model dropout_rate if not specified in attention_config for this MHA
+            mha_dropout_rate = attention_config.get("dropout_rate", dropout_rate) 
+
+            attention_module_instance = MultiHeadAttention(
                 d_model=d_model,
-                n_heads=attention_config["n_heads"],
-                dropout_rate=attention_config.get("dropout_rate", dropout_rate) # Inherit or use specific
+                n_heads=mha_n_heads,
+                dropout_rate=mha_dropout_rate
             )
         elif attention_type == "AHC":
-            # For AHC, d_model and dropout_rate are fundamental. Other AHC-specific params
-            # like n_heads (for local MHA), chunk_size, etc., should be in attention_config.
-            # Example: pass all of attention_config to AHCAttention, let it handle specifics.
-            ahc_params = attention_config.copy() # Make a copy to avoid modifying original
-            ahc_params.pop("type") # Remove type as it's not an AHCAttention constructor arg
+            try:
+                from .attention.ahc_attention import AHCAttention # Dynamic import
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import AHCAttention for attention_type 'AHC'. "
+                    f"Ensure 'ahc_attention.py' exists and is error-free. Original error: {e}"
+                )
             
-            # Ensure d_model and dropout_rate are correctly passed.
-            # They can be overridden by values in attention_config if explicitly set there.
-            ahc_params["d_model"] = d_model 
-            ahc_params["dropout_rate"] = attention_config.get("dropout_rate", dropout_rate)
+            # Prepare constructor parameters for AHCAttention
+            # Remove "type" as AHCAttention doesn't expect it. d_model is passed explicitly.
+            ahc_constructor_params = {k: v for k, v in attention_config.items() if k != 'type'}
+            
+            # Validate required keys for AHC
+            required_ahc_keys = {'n_heads', 'chunk_size', 'summarization_method_config', 
+                                 'global_attention_method_config', 'combination_method_config'}
+            missing_keys = required_ahc_keys - set(ahc_constructor_params.keys())
+            if missing_keys:
+                raise ValueError(f"AHC configuration is missing required keys: {missing_keys}. Provided config: {attention_config}")
 
-            # Placeholder for AHCAttention instantiation
-            # self.attention_module = AHCAttention(**ahc_params)
-            # For now, as AHCAttention might not be fully implemented or its exact params defined:
-            # We can raise a NotImplementedError or print a message.
-            # Let's assume AHCAttention will take d_model, dropout_rate, and other specific configs
-            # For the purpose of this step, we'll prepare for its instantiation.
-            # The actual AHCAttention class would need to handle these params.
-            # For example, if AHCAttention takes d_model, n_heads (local), chunk_size etc.
-            # and we expect them in attention_config.
-            if "n_heads" not in ahc_params: # Assuming AHC also needs n_heads for its local attention
-                 raise ValueError("n_heads is required in attention_config for AHC")
+            # Further validation for nested configs (structure and 'type' key) as per LlamaPReview
+            for key in ['summarization_method_config', 'global_attention_method_config', 'combination_method_config']:
+                config_dict = ahc_constructor_params[key] # Access directly as it's a required key
+                if not isinstance(config_dict, dict):
+                    raise ValueError(f"AHC config's '{key}' must be a dictionary. Provided: {config_dict}")
+                if 'type' not in config_dict: # Check for 'type' key within the nested dict
+                        raise ValueError(f"AHC config's '{key}' must have a 'type' specified. Provided: {config_dict}")
 
-            # This is a conceptual instantiation. The actual AHCAttention class will define its args.
-            # For now, let's ensure it gets d_model and dropout_rate, plus other config.
-            attention_module = AHCAttention(
-                d_model=d_model,
-                # n_heads=ahc_params.pop("n_heads"), # AHCAttention would take n_heads directly
-                # chunk_size=ahc_params.pop("chunk_size"), # Example
-                # ... other AHC specific parameters from ahc_params
-                **ahc_params # Pass the rest of the AHC specific params
+            # Validate chunk_size
+            configured_chunk_size = ahc_constructor_params.get('chunk_size')
+            if not isinstance(configured_chunk_size, int):
+                raise ValueError(f"AHC config: 'chunk_size' must be an integer. Got {configured_chunk_size}")
+            if configured_chunk_size <= 0:
+                raise ValueError(f"AHC config: 'chunk_size' must be positive. Got {configured_chunk_size}")
+            
+            # Validate chunk_size against model_max_len (from positional encoding)
+            # self.positional_encoding must be initialized before this point.
+            if configured_chunk_size > self.positional_encoding.max_len:
+                raise ValueError(
+                    f"AHC config: chunk_size ({configured_chunk_size}) "
+                    f"cannot be greater than model's pos_encoding_max_len ({self.positional_encoding.max_len})."
+                )
+            
+            # Set default dropout for AHC if not provided in its specific config, inheriting from model's dropout_rate
+            ahc_constructor_params.setdefault('dropout_rate', dropout_rate)
+            # Pass model_max_length to AHCAttention for its internal validation if needed
+            ahc_constructor_params['model_max_length'] = self.positional_encoding.max_len
+
+
+            attention_module_instance = AHCAttention(
+                d_model=d_model, 
+                **ahc_constructor_params # Pass all other AHC-specific params
             )
-            # For the subtask, the above instantiation is what we aim for.
-            # If AHCAttention is not yet implemented, this line would fail at runtime.
-            # For now, to make it runnable for testing VanillaMHA, we can use a placeholder:
-            # raise NotImplementedError(f"Attention type '{attention_type}' not fully implemented yet.")
-            # However, the goal is to set up the structure, so we'll assume AHCAttention can be imported.
-
+        # Add elif blocks here for PASAttention, MOAEAttention when they are implemented
+        # e.g., elif attention_type == "PAS": from .attention.pas_attention import PASAttention ...
         else:
-            raise ValueError(f"Unsupported attention type: {attention_type}")
+            raise ValueError(f"Unsupported attention_type in config: '{attention_type}'")
+
+        if attention_module_instance is None: # Safeguard, should be caught by logic above
+            raise RuntimeError(f"Attention module was not instantiated for attention_type: {attention_type}")
 
         feed_forward_module = PositionwiseFeedForward(d_model, d_ff, dropout_rate=dropout_rate)
 
-        # Note: The dropout_rate passed to TransformerEncoderLayer is for dropout on att_output and ffn_output
-        # within that layer, before the residual connection.
         encoder_layer = TransformerEncoderLayer(
             d_model,
-            attention_module,
+            attention_module_instance, # Use the dynamically created attention module
             feed_forward_module,
-            dropout_rate=dropout_rate
+            dropout_rate=dropout_rate # Dropout for sub-layer outputs in TransformerEncoderLayer
         )
         self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _ in range(num_encoder_layers)])
 
@@ -208,14 +241,11 @@ class TransformerEncoder(nn.Module):
         Forward pass for the TransformerEncoder model.
 
         Args:
-            input_ids (torch.Tensor): Input token IDs.
-                                      Shape: (batch_size, seq_len).
+            input_ids (torch.Tensor): Input token IDs. Shape: (batch_size, seq_len).
             attention_mask (torch.Tensor, optional): Mask for the input sequence (1 for tokens, 0 for padding).
-                                                     Shape: (batch_size, seq_len). Defaults to None.
-
+                                                  Shape: (batch_size, seq_len). Defaults to None.
         Returns:
-            torch.Tensor: Logits over the vocabulary.
-                          Shape: (batch_size, seq_len, vocab_size).
+            torch.Tensor: Logits over the vocabulary. Shape: (batch_size, seq_len, vocab_size).
         """
         # 1. Embeddings and Positional Encoding
         x = self.token_embedding(input_ids) # Shape: (batch_size, seq_len, d_model)
@@ -225,23 +255,36 @@ class TransformerEncoder(nn.Module):
         
         x = self.embedding_dropout(x) # Additional dropout after embeddings and PE
 
-        # 2. Prepare Attention Mask
-        src_mask = None
-        if attention_mask is not None:
-            # Input attention_mask is (batch_size, seq_len) where 1=real token, 0=padding.
-            # MHA expects mask for masked_fill where 0 means "mask this token (set to -inf)".
-            # So, if attention_mask is already 0 for padding, it's in the correct format.
-            # We need to reshape it for MHA: (batch_size, 1, 1, seq_len) for broadcasting.
-            src_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            # Ensure mask values are boolean for masked_fill, or that the logic in ScaledDotProductAttention
-            # handles 0/1 appropriately (e.g., `scores.masked_fill(mask == 0, -1e9)`).
-            # If mask is float, it might need conversion: src_mask = src_mask.bool()
-            # Given our MHA implementation, `mask == 0` is used, so 0 for padding is correct.
+        # 2. Prepare Attention Mask for TransformerEncoderLayers
+        # The attention_mask from input is typically a 2D padding mask (B, S)
+        # Each attention mechanism (MHA, AHC) might need to process this further internally
+        # For MHA, this 2D mask is usually converted to (B, 1, 1, S) or (B, 1, S, S) for causal.
+        # AHC's _process_input_mask handles creating a chunkable mask.
+        # We pass the 2D mask (or None) to the layers, and the attention module handles it.
+        # For causal LM, a separate causal mask is typically applied *inside* the attention mechanism.
+        # The input 'attention_mask' here primarily serves as a *padding mask*.
+        
+        # The TransformerEncoderLayer expects src_mask.
+        # If it's for causal LM, the attention mechanism itself should apply causal masking.
+        # The 'attention_mask' passed here is for padding.
+        # Most attention mechanisms are designed to accept a (B, S_key) or (B, S_query, S_key) padding mask.
+        # VanillaMHA and AHC are designed to take input_padding_mask of shape (B,S).
+        # AHCAttention._process_input_mask will handle its conversion.
+        # VanillaMHA's ScaledDotProductAttention expects (B, H, Q_len, K_len) or broadcastable.
+        # Let's ensure the mask passed to layers is suitable, or let attention modules adapt it.
+        # For self-attention, if `attention_mask` is (B,S_q), VanillaMHA expects it expanded for K.
+        # The most common interface for a padding mask to an MHA layer is (B, S_k).
+        # The MHA then expands it: (B, S_k) -> (B, 1, 1, S_k) and combines with causal mask.
+        
+        # For this model, `attention_mask` is (B, S_input_ids). It represents padding.
+        # The attention layers will use this for their `mask` argument.
+        # Causal masking is handled internally by the attention modules if they are causal by default.
+        src_processed_mask = attention_mask # Pass the (B,S) padding mask directly
 
         # 3. Transformer Layers
         output = x
         for layer in self.layers:
-            output = layer(output, src_mask=src_mask)
+            output = layer(output, src_mask=src_processed_mask) # Pass the 2D padding mask
 
         # 4. Final Normalization
         output = self.norm(output)
