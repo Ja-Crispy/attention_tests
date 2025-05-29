@@ -214,7 +214,11 @@ class AHCAttention(nn.Module):
             
         return chunked_tensor, chunked_mask_output, padding_needed, original_seq_len
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, input_padding_mask: torch.Tensor = None):
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, input_padding_mask: torch.Tensor = None, mask: torch.Tensor = None):
+        # Allow passing mask as an alias for input_padding_mask (for compatibility with standard attention interfaces)
+        if input_padding_mask is None and mask is not None:
+            input_padding_mask = mask
+            
         batch_size, original_seq_len, d_model = query.shape
         device = query.device
 

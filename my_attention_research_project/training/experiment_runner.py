@@ -125,12 +125,18 @@ def main():
     vocab_size = tokenizer.vocab_size # Use actual vocab size from the loaded tokenizer
     logger.info(f"Initializing model (TransformerEncoder) with vocab_size: {vocab_size}")
 
+    # Extract attention-specific configuration from the model_config
+    attention_specific_config = model_config.get('attention')
+    if not attention_specific_config:
+        logger.error("Key 'attention' missing in model configuration ('model.attention'). Cannot initialize TransformerEncoder.")
+        return # Or raise a more specific error
+
     # TODO: Add logic to select model type based on config['model']['type'] if more models are introduced.
     # For now, directly uses TransformerEncoder.
     model = TransformerEncoder(
         vocab_size=vocab_size,
         d_model=model_config.get('d_model', 256),
-        n_heads=model_config.get('n_heads', 4),
+        attention_config=attention_specific_config, # Pass the extracted attention configuration
         num_encoder_layers=model_config.get('num_encoder_layers', 3),
         ffn_dim_factor=model_config.get('ffn_dim_factor', 4),
         dropout_rate=model_config.get('dropout_rate', 0.1),

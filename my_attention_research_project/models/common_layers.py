@@ -6,13 +6,13 @@ class PositionalEncoding(nn.Module):
     """
     Implements Positional Encoding.
 
-    Args:
-        d_model (int): The dimension of the model.
+    Args:        d_model (int): The dimension of the model.
         max_len (int, optional): The maximum sequence length. Defaults to 5000.
         dropout_rate (float, optional): Dropout rate. Defaults to 0.1.
     """
     def __init__(self, d_model: int, max_len: int = 5000, dropout_rate: float = 0.1):
         super().__init__()
+        self.max_len = max_len  # Store max_len as instance attribute
         self.dropout = nn.Dropout(p=dropout_rate)
 
         # Create positional encoding matrix
