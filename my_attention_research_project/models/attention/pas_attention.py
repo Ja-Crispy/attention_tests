@@ -5,7 +5,7 @@ from my_attention_research_project.models.attention.vanilla_mha import MultiHead
 
 class PASAttention(nn.Module):
     """
-    Implements the Perceiver Attention Sampling (PAS) mechanism.
+    Implements the Predictive Attention Scaffolding (PAS) mechanism.
     """
     def __init__(self, 
                  d_model: int, 
@@ -28,29 +28,35 @@ class PASAttention(nn.Module):
         # self.dropout_rate = dropout_rate # General dropout, not directly used here but stored if needed elsewhere
 
         # Scanner initialization
-        if self.scanner_config.get("type") == "PAS_P1_linear":
+        scanner_type = self.scanner_config.get("type")
+        if scanner_type == "PAS_P1_linear":
             self.scanner_q_proj = nn.Linear(self.d_model, self.d_model, bias=False)
             self.scanner_k_proj = nn.Linear(self.d_model, self.d_model, bias=False)
             self.top_k_hotspots = self.scanner_config.get("top_k_hotspots")
             if self.top_k_hotspots is None:
                 raise ValueError("top_k_hotspots must be provided in scanner_config for PAS_P1_linear")
+            if not isinstance(self.top_k_hotspots, int) or self.top_k_hotspots < 0:
+                raise ValueError("top_k_hotspots must be a non-negative integer.")
             self.scanner = self._linear_scanner
+        # Add elif for "PAS_P2_conv" here when implemented
         else:
-            self.scanner = None 
+            raise NotImplementedError(f"Scanner type '{scanner_type}' is not implemented or not configured.")
 
         # Focused Attention MHA initialization
         mha_num_heads = self.focused_attention_config.get("num_heads")
         if mha_num_heads is None:
             raise ValueError("num_heads must be provided in focused_attention_config")
         
-        # Use 0.0 as default for MHA dropout_rate if not specified in its config
-        mha_dropout_rate = self.focused_attention_config.get("dropout_rate", 0.0) 
+        # Use dropout_rate from this module's init as default if not in focused_attention_config
+        mha_dropout_rate = self.focused_attention_config.get("dropout_rate", dropout_rate) 
         
         self.focused_attention_mha = MultiHeadAttention(
             d_model=self.d_model, 
-            n_heads=mha_num_heads, 
+            n_heads=mha_num_heads, # Corrected parameter name
             dropout_rate=mha_dropout_rate
         )
+        # Assign the method directly if only one type of focused attention is planned
+        # If multiple types were possible, a factory similar to scanner could be used.
         self.focused_attention = self._focused_sparse_attention
 
 
@@ -72,25 +78,32 @@ class PASAttention(nn.Module):
         k_proj = self.scanner_k_proj(key_embed)
 
         scores = torch.matmul(q_proj, k_proj.transpose(-2, -1))
-        scores = F.elu(scores) + 1
+        # Using ELU + 1 as a simple non-negative kernel approximation
+        scores = F.elu(scores) + 1 
 
         if key_padding_mask is not None:
-            mask = key_padding_mask.unsqueeze(1) # (batch_size, 1, seq_len_k)
-            if mask.dtype != torch.bool: 
-                mask = mask.bool()
-            scores = scores.masked_fill(mask == False, float('-inf'))
+            # key_padding_mask is (B, S_k), True for valid. MHF expects False for mask.
+            mask_for_fill = key_padding_mask.unsqueeze(1) # (B, 1, S_k)
+            if mask_for_fill.dtype != torch.bool: 
+                mask_for_fill = mask_for_fill.bool() # Ensure boolean for masked_fill
+            # Where mask_for_fill is False (i.e., original padding), set scores to -inf
+            scores = scores.masked_fill(mask_for_fill == False, float('-inf'))
 
-        k_dim_size = scores.size(-1)
-        current_k = min(self.top_k_hotspots, k_dim_size)
+        # Determine actual k for topk, ensuring it's not larger than available keys
+        # and handles case where key_embed might be empty along seq_len_k
+        key_seq_len = scores.size(-1)
+        current_k = min(self.top_k_hotspots, key_seq_len)
         
-        if k_dim_size == 0 : 
+        if key_seq_len == 0 : # No keys to select from
             batch_size, seq_len_q, _ = query_embed.shape
+            # Return empty indices tensor of correct shape for top_k=0
             return torch.empty((batch_size, seq_len_q, 0), dtype=torch.long, device=query_embed.device)
 
-        # If current_k is 0 (e.g. self.top_k_hotspots is 0), topk returns empty tensors.
-        # If all scores are -inf, topk still returns indices (they just correspond to -inf scores).
-        # The sparse attention mask will handle these 'invalid' selections.
-        _, hotspot_indices = torch.topk(scores, k=current_k, dim=-1)
+        if current_k == 0: # If top_k_hotspots is 0
+             batch_size, seq_len_q, _ = query_embed.shape
+             return torch.empty((batch_size, seq_len_q, 0), dtype=torch.long, device=query_embed.device)
+        
+        _, hotspot_indices = torch.topk(scores, k=current_k, dim=-1, sorted=False) # Not necessarily sorted
         
         return hotspot_indices
 
@@ -106,58 +119,63 @@ class PASAttention(nn.Module):
             query: Query tensor (batch_size, seq_len_q, d_model).
             key: Original full key sequence (batch_size, seq_len_k_orig, d_model).
             value: Original full value sequence (batch_size, seq_len_k_orig, d_model).
-            hotspot_indices: Indices from Stage 1 (batch_size, seq_len_q, top_k_hotspots).
+            hotspot_indices: Indices from Stage 1 (batch_size, seq_len_q, top_k).
             original_key_padding_mask: Padding mask for the original key sequence (batch_size, seq_len_k_orig).
                                        True/1 for valid, False/0 for pad.
         Returns:
             context_vector: Output from the focused attention (batch_size, seq_len_q, d_model).
         """
-        batch_size, seq_len_q, d_model_q = query.shape # d_model_q should be self.d_model
-        _, _, top_k = hotspot_indices.shape
+        batch_size, seq_len_q, d_model_q = query.shape
+        _, _, top_k = hotspot_indices.shape # top_k is the actual number of gathered indices
 
-        if top_k == 0: # No hotspots selected (e.g. top_k_hotspots was 0 or seq_len_k was 0)
+        if top_k == 0: # No hotspots selected or available
             return torch.zeros_like(query)
 
-        expanded_hotspot_indices = hotspot_indices.unsqueeze(-1).expand(-1, -1, -1, self.d_model)
+        # Gather K and V based on hotspot_indices
+        # hotspot_indices: (B, S_q, top_k)
+        # key: (B, S_k_orig, D) -> expand for S_q -> (B, S_q, S_k_orig, D)
+        # expanded_hotspot_indices for gather: (B, S_q, top_k, D)
+        expanded_hotspot_indices_for_gather = hotspot_indices.unsqueeze(-1).expand(-1, -1, -1, self.d_model)
 
         k_gathered = torch.gather(key.unsqueeze(1).expand(-1, seq_len_q, -1, -1), 
                                   dim=2, 
-                                  index=expanded_hotspot_indices)
+                                  index=expanded_hotspot_indices_for_gather)
         v_gathered = torch.gather(value.unsqueeze(1).expand(-1, seq_len_q, -1, -1), 
                                   dim=2, 
-                                  index=expanded_hotspot_indices)
+                                  index=expanded_hotspot_indices_for_gather)
+        # k_gathered, v_gathered: (B, S_q, top_k, D)
 
-        sparse_mask = torch.ones(batch_size, seq_len_q, top_k, device=query.device, dtype=torch.bool)
-
+        # Create the mask for the sparse attention (MHA expects mask where 0 means mask)
+        # This mask should be (B, S_q, top_k) where True/1 means valid to attend.
+        # It needs to account for padding in the *original* key sequence for the gathered items.
+        gathered_attention_mask = torch.ones(batch_size, seq_len_q, top_k, device=query.device, dtype=torch.bool)
         if original_key_padding_mask is not None:
             # original_key_padding_mask: (B, S_k_orig), True for valid
-            # hotspot_indices: (B, S_q, top_k)
-            # gathered_padding_status: (B, S_q, top_k), True if original key at this hotspot index was valid
+            # We need to gather the padding status of the selected hotspots
+            # gathered_padding_status: (B, S_q, top_k)
             gathered_padding_status = torch.gather(
                 original_key_padding_mask.unsqueeze(1).expand(-1, seq_len_q, -1), 
                 dim=2, 
                 index=hotspot_indices
             )
-            sparse_mask = sparse_mask & gathered_padding_status
+            gathered_attention_mask = gathered_attention_mask & gathered_padding_status
         
-        # sparse_mask: (batch_size, seq_len_q, top_k), True means attend, False means mask.
-        # MHA expects mask where False means "mask this position". This is consistent.
-        sparse_mask_for_mha = sparse_mask.unsqueeze(1).unsqueeze(2) # (B, 1, S_q, top_k)
-        
+        # Reshape query and gathered K,V for batched MHA
+        # Each (query_token_i, its_top_k_keys, its_top_k_values) will be a separate item in a larger batch for MHA
+        # Query: (B, S_q, D) -> (B * S_q, 1, D)
         q_reshaped = query.contiguous().view(batch_size * seq_len_q, 1, self.d_model)
+        # Keys: (B, S_q, top_k, D) -> (B * S_q, top_k, D)
         k_reshaped = k_gathered.contiguous().view(batch_size * seq_len_q, top_k, self.d_model)
         v_reshaped = v_gathered.contiguous().view(batch_size * seq_len_q, top_k, self.d_model)
-        
-        # Mask for MHA: (B * S_q, 1, 1, top_k)
-        # Each of the (B * S_q) queries has length 1.
-        # The keys for each query have length top_k.
-        # The MHA mask should be (N, num_heads, L_q, L_k) or (N, L_q, L_k)
-        # Here N = B * S_q, L_q = 1, L_k = top_k
-        # So, mask_reshaped should be (B * S_q, 1, top_k) or (B*S_q, num_heads, 1, top_k)
-        # The prompt specifies mask_reshaped = sparse_mask_for_mha.view(batch_size * seq_len_q, 1, 1, top_k)
-        mask_reshaped = sparse_mask_for_mha.view(batch_size * seq_len_q, 1, 1, top_k)
 
-        context_reshaped, _ = self.focused_attention_mha(q_reshaped, k_reshaped, v_reshaped, mask=mask_reshaped)
+        # Prepare mask for MHA: (B, S_q, top_k) -> (B * S_q, 1, 1, top_k)
+        # This is a padding mask for the gathered keys. MHA expects 0 for masked.
+        mha_mask = gathered_attention_mask.view(batch_size * seq_len_q, 1, top_k)
+        mha_mask = mha_mask.unsqueeze(1) # (B*S_q, 1, 1, top_k)
+        if mha_mask.dtype != torch.bool:
+            mha_mask = mha_mask.bool() # Ensure boolean for masked_fill in MHA
+
+        context_reshaped, _ = self.focused_attention_mha(q_reshaped, k_reshaped, v_reshaped, mask= (mha_mask == False) ) # MHA expects False to mask
         
         context_vector = context_reshaped.view(batch_size, seq_len_q, self.d_model)
         return context_vector
@@ -166,7 +184,7 @@ class PASAttention(nn.Module):
                 query: torch.Tensor, 
                 key: torch.Tensor, 
                 value: torch.Tensor, 
-                mask: torch.Tensor = None):
+                input_padding_mask: torch.Tensor = None): # Using input_padding_mask for clarity
         """
         Performs the forward pass of the PASAttention module.
 
@@ -174,27 +192,26 @@ class PASAttention(nn.Module):
             query: The query tensor (batch_size, seq_len_q, d_model).
             key: The key tensor (batch_size, seq_len_k_orig, d_model).
             value: The value tensor (batch_size, seq_len_k_orig, d_model).
-            mask: An optional mask for input padding (batch_size, seq_len_k_orig).
-                  Assumed to be True/1 for valid, False/0 for padding.
-                  This parameter is renamed from input_padding_mask for consistency
-                  with other attention modules in the TransformerEncoderLayer.
+            input_padding_mask: An optional mask for input padding of the original key sequence (batch_size, seq_len_k_orig).
+                                Assumed to be True/1 for valid tokens, False/0 for padding.
 
         Returns:
             context_vector: The output tensor from the focused attention mechanism.
-            hotspot_indices: Indices of the top_k hotspots.
+            hotspot_indices (torch.Tensor, optional): Indices of the top_k hotspots. Returned for debugging/analysis.
         """
-        # Map mask parameter to input_padding_mask for internal use
-        input_padding_mask = mask
-        
         hotspot_indices = None
         if self.scanner is not None:
+            # The scanner needs the key_padding_mask which is our input_padding_mask
             hotspot_indices = self.scanner(query, key, input_padding_mask)
         else:
-            raise NotImplementedError("Scanner is not configured, but PAS requires a scanner.")
+            # This case should ideally be caught by __init__ if scanner_type is not supported
+            raise NotImplementedError("Scanner is not configured or scanner type is invalid, but PAS requires a scanner.")
 
         if self.focused_attention is not None:
-            # Pass original_key_padding_mask (which is input_padding_mask) to focused attention
+            # Pass the original input_padding_mask (which corresponds to the original key sequence)
+            # to _focused_sparse_attention so it can correctly mask the gathered keys.
             context_vector = self.focused_attention(query, key, value, hotspot_indices, input_padding_mask)
-            return context_vector, hotspot_indices
+            return context_vector, hotspot_indices # Returning hotspot_indices for potential analysis
         else:
+            # This case should also be caught by __init__
             raise NotImplementedError("Focused attention is not configured.")
