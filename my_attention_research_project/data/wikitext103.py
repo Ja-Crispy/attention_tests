@@ -8,9 +8,7 @@ import shutil # For robust directory removal in examples
 import json # For saving/loading processed data list
 import os
 import logging
-import requests # From pas-attention branch for direct download
-import zipfile  # From pas-attention branch for direct download
-import io       # From pas-attention branch for direct download
+from datasets import load_dataset # Import for Hugging Face datasets
 
 # Import from the project's tokenizer.py
 from .tokenizer import load_tokenizer, tokenize_function 
@@ -20,13 +18,12 @@ logger = logging.getLogger(__name__)
 if not logger.hasHandlers(): # Ensure logger is configured only once
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-WIKITEXT103_URL = "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-raw-v1.zip"
 EXPECTED_RAW_FILES = ["wiki.train.raw", "wiki.valid.raw", "wiki.test.raw"] # From pas-attention
 
 def download_raw_text_files(raw_data_dir: str) -> None:
     """
-    Downloads and extracts the WikiText-103 raw text files into the specified directory.
-    Uses direct download via requests and zipfile.
+    Downloads and extracts the WikiText-103 raw text files into the specified directory
+    using the Hugging Face datasets library.
 
     Args:
         raw_data_dir (str): Path to the directory where raw text files will be extracted.
@@ -35,39 +32,43 @@ def download_raw_text_files(raw_data_dir: str) -> None:
     raw_data_path.mkdir(parents=True, exist_ok=True)
 
     # Check if all expected files (with .raw extension) already exist
-    files_exist = all((raw_data_path / fname).exists() for fname in EXPECTED_RAW_FILES)
-    if files_exist:
-        logger.info(f"WikiText-103 raw files ({', '.join(EXPECTED_RAW_FILES)}) already exist in {raw_data_dir}. Skipping download.")
+    all_files_exist = all((raw_data_path / fname).exists() for fname in EXPECTED_RAW_FILES)
+    if all_files_exist:
+        logger.info(f"All raw text files already exist in {raw_data_dir}. Skipping download.")
         return
 
-    logger.info(f"Downloading WikiText-103 raw data from {WIKITEXT103_URL}...")
+    logger.info("Downloading WikiText-103 raw data using the 'datasets' library...")
     try:
-        response = requests.get(WIKITEXT103_URL, stream=True)
-        response.raise_for_status() 
+        # Load the dataset from Hugging Face
+        # Using 'wikitext-103-raw-v1' which is the raw version
+        dataset = load_dataset("wikitext", "wikitext-103-raw-v1")
 
-        logger.info("Download complete. Extracting files...")
-        with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-            for member_info in z.infolist():
-                # Expected path in zip: wikitext-103-raw/wiki.train.raw etc.
-                parts = Path(member_info.filename).parts
-                if len(parts) > 1 and parts[0] == "wikitext-103-raw" and parts[1] in EXPECTED_RAW_FILES:
-                    file_content = z.read(member_info.filename)
-                    target_path = raw_data_path / parts[1] # Save as wiki.train.raw etc.
-                    with open(target_path, 'wb') as f:
-                        f.write(file_content)
-                    logger.info(f"Extracted {parts[1]} to {target_path}")
-        
-        logger.info(f"WikiText-103 raw files successfully downloaded and extracted to {raw_data_dir}")
+        # Define mapping from dataset split names to our expected filenames
+        split_to_filename = {
+            "train": "wiki.train.raw",
+            "validation": "wiki.valid.raw",
+            "test": "wiki.test.raw",
+        }
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error downloading WikiText-103: {e}")
-        raise
-    except zipfile.BadZipFile as e:
-        logger.error(f"Error extracting zip file for WikiText-103: {e}")
-        raise
+        for split_name, filename in split_to_filename.items():
+            output_file_path = raw_data_path / filename
+            logger.info(f"Processing and saving {split_name} data to {output_file_path}...")
+            with open(output_file_path, "w", encoding="utf-8") as f:
+                # The dataset has a 'text' column. We join all text entries with newlines.
+                # Filter out empty lines that might be present in the dataset.
+                lines_to_write = [text_item for text_item in dataset[split_name]['text'] if text_item.strip()]
+                f.write("\n".join(lines_to_write))
+            logger.info(f"Successfully saved {output_file_path}")
+
+        logger.info("Successfully downloaded and processed all WikiText-103 raw files.")
+
     except Exception as e:
-        logger.error(f"An unexpected error occurred during download/extraction: {e}")
-        raise
+        logger.error(f"Error downloading or processing WikiText-103 using 'datasets': {e}")
+        # Optionally, clean up partially downloaded files if an error occurs
+        for fname in EXPECTED_RAW_FILES:
+            if (raw_data_path / fname).exists():
+                (raw_data_path / fname).unlink()
+        raise # Re-raise the exception to signal failure
 
 
 def preprocess_text_files_for_causal_lm(
