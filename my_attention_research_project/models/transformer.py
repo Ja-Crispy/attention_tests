@@ -326,7 +326,24 @@ class TransformerEncoder(nn.Module):
         # For this model, `attention_mask` is (B, S_input_ids). It represents padding.
         # The attention layers will use this for their `mask` argument.
         # Causal masking is handled internally by the attention modules if they are causal by default.
-        src_processed_mask = attention_mask # Pass the (B,S) padding mask directly
+
+        # Process attention mask for transformer layers
+        if attention_mask is not None:
+            # attention_mask is [batch_size, seq_len] with 1 for valid tokens, 0 for padding
+            # For causal attention, we need to create a lower triangular mask
+            batch_size, seq_len = attention_mask.shape
+            
+            # Create causal mask [seq_len, seq_len]
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=attention_mask.device))
+            
+            # Expand attention_mask to [batch_size, seq_len, seq_len] and combine with causal mask
+            expanded_attention_mask = attention_mask.unsqueeze(1).expand(batch_size, seq_len, seq_len)
+            expanded_attention_mask = expanded_attention_mask * attention_mask.unsqueeze(2).expand(batch_size, seq_len, seq_len)
+            
+            # Combine with causal mask
+            src_processed_mask = expanded_attention_mask * causal_mask.unsqueeze(0)
+        else:
+            src_processed_mask = None
 
         # 3. Transformer Layers
         output = x

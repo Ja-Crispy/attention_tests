@@ -33,8 +33,17 @@ class ScaledDotProductAttention(nn.Module):
         # MatMul QK^T
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.d_k)
 
-        # Apply mask if provided
         if mask is not None:
+            # Ensure mask has the correct shape for broadcasting
+            # Expected: scores shape is [batch_size, num_heads, seq_len, seq_len]
+            # mask should be broadcastable to this shape
+            if mask.dim() == 2:
+                # mask is [batch_size, seq_len] -> expand to [batch_size, 1, 1, seq_len]
+                mask = mask.unsqueeze(1).unsqueeze(1)
+            elif mask.dim() == 3:
+                # mask is [batch_size, seq_len, seq_len] -> expand to [batch_size, 1, seq_len, seq_len]
+                mask = mask.unsqueeze(1)
+
             scores = scores.masked_fill(mask == 0, -1e9)
 
         # Apply softmax to get attention weights
