@@ -1,0 +1,58 @@
+# Base parameters for benchmarking configurations
+# experiment_name will be set by the runner, usually based on filename
+
+model:
+  d_model: 256
+  num_encoder_layers: 4
+  ffn_dim_factor: 4
+  dropout_rate: 0.1 # General dropout for FFN, embeddings, etc.
+  use_positional_embeddings: True
+  # vocab_size will be set by the experiment_runner.py based on the tokenizer
+
+  # Attention specific configuration will be added below by each file
+  attention:
+    type: "MOAE"
+    dropout_rate: 0.1 # Overall MOAE module dropout
+
+    expert_configs:
+      - type: "local_window_mha"
+        n_heads: 2 # d_model 256 / 2 heads = head_dim 128
+        window_size: 64
+        dropout_rate: 0.1 # Expert-specific dropout
+      - type: "dilated_mha"
+        n_heads: 2 # d_model 256 / 2 heads = head_dim 128
+        dilation_rate: 4 # Attend to keys at 0, 4, 8 ...
+        dropout_rate: 0.1 # Expert-specific dropout
+    
+    gating_config:
+      type: "soft_gate_mlp"
+      hidden_dim: 64   # Hidden dimension for the gating MLP
+      dropout_rate: 0.1 # Dropout for the gating network
+
+data:
+  dataset_name: "WikiText103"
+  sequence_length: 1024
+  batch_size: 16 
+  data_dir: "./data/processed/wikitext-103" # Path to processed data
+  tokenizer_path: "./data/tokenizers/wikitext103_bpe.tokenizer.json" # Path to tokenizer
+  # tokenizer_max_length is usually in config['data'] and used by preprocessing.
+  # Should be >= sequence_length. If not set, a default is used in wikitext103.py.
+  tokenizer_max_length: 1024 # Set explicitly for clarity during benchmark runs
+
+training:
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  num_epochs: 3 # Short duration for benchmarking purposes
+  gradient_clipping: 1.0
+  random_seed: 42
+  lr_scheduler:
+    type: "cosine_annealing"
+    warmup_steps: 500 # Example, adjust based on total steps if used for real pre-training
+    min_lr: 0.000005
+  # checkpoint_dir will be set by experiment_runner or a main script
+  # results_dir will be set by experiment_runner or a main script
+
+logging:
+  log_level: "INFO"
+  log_file: "bench_moae_seq1024.log"
