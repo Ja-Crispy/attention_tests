@@ -28,46 +28,52 @@ def download_raw_text_files(raw_data_dir: str) -> None:
     Args:
         raw_data_dir (str): Path to the directory where raw text files will be extracted.
     """
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        logging.error("datasets library not found. Please install with: pip install datasets")
+        raise ImportError("datasets library is required for downloading WikiText-103")
+    
     raw_data_path = Path(raw_data_dir)
     raw_data_path.mkdir(parents=True, exist_ok=True)
-
+    
+    train_file = raw_data_path / "train.txt"
+    valid_file = raw_data_path / "valid.txt"
+    test_file = raw_data_path / "test.txt"
+    
     # Check if files already exist
-    files_exist = all((raw_data_path / fname).exists() for fname in EXPECTED_RAW_FILES)
-    if files_exist:
-        logging.info(f"WikiText-103 raw files already exist in {raw_data_dir}. Skipping download.")
+    if train_file.exists() and valid_file.exists() and test_file.exists():
+        logging.info("WikiText-103 files already exist. Skipping download.")
         return
-
-    logging.info(f"Downloading WikiText-103 raw data from {WIKITEXT103_URL}...")
+    
+    logging.info("Downloading WikiText-103 from Hugging Face datasets...")
+    
     try:
-        response = requests.get(WIKITEXT103_URL, stream=True)
-        response.raise_for_status()  # Raise an exception for bad status codes
-
-        logging.info("Download complete. Extracting files...")
-        with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-            # The zip file contains a top-level directory "wikitext-103-raw/"
-            # We need to extract files from this directory into raw_data_dir directly.
-            for member_info in z.infolist():
-                # Check if the member is one of the files we want and is inside the top-level folder
-                # e.g., "wikitext-103-raw/wiki.train.raw"
-                parts = Path(member_info.filename).parts
-                if len(parts) > 1 and parts[0] == "wikitext-103-raw" and parts[1] in EXPECTED_RAW_FILES:
-                    # Extract the file, stripping the top-level directory
-                    file_content = z.read(member_info.filename)
-                    target_path = raw_data_path / parts[1]
-                    with open(target_path, 'wb') as f:
-                        f.write(file_content)
-                    logging.info(f"Extracted {parts[1]} to {target_path}")
+        # Load the dataset from Hugging Face
+        dataset = load_dataset("wikitext", "wikitext-103-raw-v1")
         
-        logging.info(f"WikiText-103 raw files successfully downloaded and extracted to {raw_data_dir}")
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error downloading WikiText-103: {e}")
-        raise
-    except zipfile.BadZipFile as e:
-        logging.error(f"Error extracting zip file for WikiText-103: {e}")
-        raise
+        # Save train split
+        logging.info("Saving train split...")
+        with open(train_file, 'w', encoding='utf-8') as f:
+            for example in dataset['train']:
+                f.write(example['text'] + '\n')
+        
+        # Save validation split
+        logging.info("Saving validation split...")
+        with open(valid_file, 'w', encoding='utf-8') as f:
+            for example in dataset['validation']:
+                f.write(example['text'] + '\n')
+        
+        # Save test split
+        logging.info("Saving test split...")
+        with open(test_file, 'w', encoding='utf-8') as f:
+            for example in dataset['test']:
+                f.write(example['text'] + '\n')
+        
+        logging.info(f"WikiText-103 dataset downloaded successfully to {raw_data_dir}")
+        
     except Exception as e:
-        logging.error(f"An unexpected error occurred during download/extraction: {e}")
+        logging.error(f"Error downloading WikiText-103 from Hugging Face: {e}")
         raise
 
 
@@ -96,17 +102,14 @@ def preprocess_text_files_for_causal_lm(
     logging.info(f"Using tokenizer: {tokenizer_name_or_path} with max_length: {tokenizer_max_len}")
     tokenizer = load_tokenizer(tokenizer_name_or_path, max_length=tokenizer_max_len)
 
-    # Determine actual filenames based on splits
-    # WikiText-103 uses 'train', 'valid', 'test' for its splits.
-    # The raw files are e.g. 'wiki.train.raw'.
-    # The output processed files will be 'train.jsonl', 'valid.jsonl', 'test.jsonl'.
-    split_to_raw_filename = {
-        "train": "wiki.train.raw",
-        "valid": "wiki.valid.raw",
-        "test": "wiki.test.raw"
+    # Define the mapping of splits to file names
+    splits = {
+        'train': 'train.txt',  # Changed from 'wiki.train.raw'
+        'valid': 'valid.txt',  # Changed from 'wiki.valid.raw' 
+        'test': 'test.txt'     # Changed from 'wiki.test.raw'
     }
-
-    for split, raw_filename in split_to_raw_filename.items():
+    
+    for split, raw_filename in splits.items():
         raw_file_path = Path(raw_data_dir) / raw_filename
         processed_file_path = Path(processed_data_dir) / f"{split}.jsonl" # Output remains train.jsonl etc.
 

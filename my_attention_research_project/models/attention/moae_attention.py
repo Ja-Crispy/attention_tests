@@ -85,7 +85,7 @@ class MOAEAttention(nn.Module):
                 if window_size is None:
                     raise ValueError("window_size is required for local_window_mha expert.")
                 expert_dropout_rate = exp_conf.get("dropout_rate", self.dropout_rate)
-                mha_expert = MultiHeadAttention(self.d_model, num_heads=n_heads, dropout_rate=expert_dropout_rate)
+                mha_expert = MultiHeadAttention(self.d_model, n_heads=n_heads, dropout_rate=expert_dropout_rate)
                 mha_expert.expert_type = "local_window_mha"
                 mha_expert.window_size = window_size
                 self.experts.append(mha_expert)
@@ -100,7 +100,7 @@ class MOAEAttention(nn.Module):
                 if not isinstance(dilation_rate, int) or dilation_rate < 1:
                     raise ValueError("dilation_rate must be an integer >= 1.")
                 expert_dropout_rate = exp_conf.get("dropout_rate", self.dropout_rate)
-                mha_expert = MultiHeadAttention(self.d_model, num_heads=n_heads, dropout_rate=expert_dropout_rate)
+                mha_expert = MultiHeadAttention(self.d_model, n_heads=n_heads, dropout_rate=expert_dropout_rate)
                 mha_expert.expert_type = "dilated_mha"
                 mha_expert.dilation_rate = dilation_rate
                 self.experts.append(mha_expert)
@@ -187,66 +187,92 @@ class MOAEAttention(nn.Module):
                 query: torch.Tensor, 
                 key: torch.Tensor, 
                 value: torch.Tensor, 
-                input_padding_mask: torch.Tensor = None) -> torch.Tensor:
+                mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass for MOAE Attention.
+        
+        Args:
+            query: Query tensor of shape (batch_size, seq_len, d_model)
+            key: Key tensor of shape (batch_size, seq_len, d_model)
+            value: Value tensor of shape (batch_size, seq_len, d_model)
+            mask: Optional mask tensor of shape (batch_size, seq_len) for padding mask
+            
+        Returns:
+            tuple: (attention_output, attention_weights)
+                - attention_output: shape (batch_size, seq_len, d_model)
+                - attention_weights: shape (batch_size, num_experts, seq_len)
+        """
+        batch_size, seq_len, d_model = query.shape
         
         if not self.experts:
-            # If expert_configs was empty from the start, this is a valid "no-op" or identity if d_model matches.
-            # However, typically MOAE implies experts. If it was configured to have experts but none initialized,
-            # __init__ should have ideally caught it.
-            # For now, let's assume if self.experts is empty, it means no experts were configured.
-            # Depending on desired behavior, could return query or raise error.
-            # The prompt implies error if configured but empty.
-             raise RuntimeError("MOAEAttention has no experts configured.")
-
-        if self.gating_network is None:
-            # This implies either gating_type was None and no experts, or failed init.
-            # If experts exist but no gating, that's an issue.
-            raise RuntimeError("MOAEAttention has no gating network configured.")
-
-        batch_size, seq_len_q, _ = query.shape
-        _ , seq_len_k, _ = key.shape # key sequence length for masks
-        device = query.device
-
+            # No experts case - return zeros with appropriate shape
+            return torch.zeros_like(query), torch.zeros(batch_size, 1, seq_len, device=query.device)
+        
+        # Generate gating weights
+        gating_weights = self.gating_network(query)  # (batch_size, seq_len, num_experts)
+        
+        # Apply softmax to get probabilities
+        expert_probs = F.softmax(gating_weights, dim=-1)  # (batch_size, seq_len, num_experts)
+        
+        # Collect expert outputs
         expert_outputs = []
-        for expert_module in self.experts:
-            expert_type = expert_module.expert_type
-            current_expert_mask = None
-
-            if expert_type == "local_window_mha":
-                current_expert_mask = self._generate_local_window_mask(
-                    seq_len_k, expert_module.window_size, device, batch_size, input_padding_mask)
-            elif expert_type == "dilated_mha":
-                current_expert_mask = self._generate_dilated_mask(
-                    seq_len_k, expert_module.dilation_rate, device, batch_size, input_padding_mask)
-            # Add elif blocks here for other expert types like "PAS" if they were fully integrated
-            # elif expert_type == "PAS":
-            #    # PASAttention might not use a pre-generated mask in the same way,
-            #    # or it might take input_padding_mask directly.
-            #    # Its call signature is (query, key, value, input_padding_mask)
-            #    # And it returns (context_vector, hotspot_indices)
-            #    expert_context, _ = expert_module(query, key, value, input_padding_mask=input_padding_mask)
-            #    expert_outputs.append(expert_context)
-            #    continue # Skip common MHA call below
+        expert_attention_weights = []
+        
+        for i, expert in enumerate(self.experts):
+            if hasattr(expert, 'expert_type'):
+                if expert.expert_type == "local_window_mha":
+                    # Generate local window mask
+                    window_mask = self._generate_local_window_mask(
+                        seq_len=seq_len,
+                        window_size=expert.window_size,
+                        device=query.device,
+                        batch_size=batch_size,
+                        input_padding_mask=mask
+                    )
+                    # Convert 4D mask to 2D for compatibility with MultiHeadAttention
+                    if window_mask.dim() == 4:
+                        window_mask = window_mask.squeeze(1).squeeze(1)  # (batch_size, seq_len, seq_len) -> (batch_size, seq_len)
+                    
+                    expert_out, expert_att_weights = expert(query, key, value, mask=window_mask)
+                    
+                elif expert.expert_type == "dilated_mha":
+                    # Generate dilated mask
+                    dilated_mask = self._generate_dilated_mask(
+                        seq_len=seq_len,
+                        dilation_rate=expert.dilation_rate,
+                        device=query.device,
+                        batch_size=batch_size,
+                        input_padding_mask=mask
+                    )
+                    # Convert 4D mask to 2D for compatibility with MultiHeadAttention
+                    if dilated_mask.dim() == 4:
+                        dilated_mask = dilated_mask.squeeze(1).squeeze(1)  # (batch_size, seq_len, seq_len) -> (batch_size, seq_len)
+                    
+                    expert_out, expert_att_weights = expert(query, key, value, mask=dilated_mask)
+                    
+                else:
+                    # Standard MHA expert
+                    expert_out, expert_att_weights = expert(query, key, value, mask=mask)
             else:
-                raise NotImplementedError(f"Mask generation or call for expert type {expert_type} not implemented in forward pass.")
+                # Standard MHA expert without special type
+                expert_out, expert_att_weights = expert(query, key, value, mask=mask)
             
-            # Assuming MHA-like experts that return (context, weights)
-            expert_context, _ = expert_module(query, key, value, mask=current_expert_mask)
-            expert_outputs.append(expert_context)
+            expert_outputs.append(expert_out)
+            expert_attention_weights.append(expert_att_weights)
         
-        if not expert_outputs: # Should be caught by self.experts check, but as a safeguard
-            raise RuntimeError("No expert outputs were generated.")
-
-        # Stack expert outputs: (B, L_q, NumExperts, D)
-        stacked_expert_outputs = torch.stack(expert_outputs, dim=2) 
+        # Stack expert outputs: (num_experts, batch_size, seq_len, d_model)
+        expert_outputs = torch.stack(expert_outputs, dim=0)
         
-        # Get Gate Weights: (B, L_q, NumExperts)
-        gate_weights = self.gating_network(query) 
+        # Weighted combination of expert outputs
+        # expert_probs: (batch_size, seq_len, num_experts)
+        # expert_outputs: (num_experts, batch_size, seq_len, d_model)
+        expert_probs_permuted = expert_probs.permute(2, 0, 1).unsqueeze(-1)  # (num_experts, batch_size, seq_len, 1)
         
-        # Combine Expert Outputs using einsum
-        # gate_weights: (B, L_q, NumExperts) -> 'bln'
-        # stacked_expert_outputs: (B, L_q, NumExperts, D) -> 'blnd'
-        # combined_context: (B, L_q, D) -> 'bld'
-        combined_context = torch.einsum('bln,blnd->bld', gate_weights, stacked_expert_outputs)
+        # Element-wise multiplication and sum over experts
+        weighted_outputs = expert_outputs * expert_probs_permuted  # (num_experts, batch_size, seq_len, d_model)
+        final_output = weighted_outputs.sum(dim=0)  # (batch_size, seq_len, d_model)
         
-        return combined_context
+        # Return gating weights as attention weights for monitoring
+        gating_weights_output = expert_probs.permute(0, 2, 1)  # (batch_size, num_experts, seq_len)
+        
+        return final_output, gating_weights_output
