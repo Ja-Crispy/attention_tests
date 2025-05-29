@@ -1,0 +1,50 @@
+# Base parameters for benchmarking configurations
+# experiment_name will be set by the runner, usually based on filename
+
+model:
+  d_model: 256
+  num_encoder_layers: 4
+  ffn_dim_factor: 4
+  dropout_rate: 0.1 # General dropout for FFN, embeddings, etc.
+  use_positional_embeddings: True
+  # vocab_size will be set by the experiment_runner.py based on the tokenizer
+
+  # Attention specific configuration will be added below by each file
+  attention:
+    type: "PAS"
+    dropout_rate: 0.1 # Overall PAS module dropout (passed to focused_attention_config if not specified there)
+    scanner_config:
+      type: "PAS_P1_linear"
+      top_k_hotspots: 64 
+      # proj_dim: d_model (default)
+    focused_attention_config:
+      num_heads: 4 # d_model 256 / 4 heads = head_dim 64
+      dropout_rate: 0.1 # Specific dropout for the focused MHA
+
+data:
+  dataset_name: "WikiText103"
+  sequence_length: 512
+  batch_size: 16 # Smaller batch size for potentially larger models or limited GPU memory during benchmark
+  data_dir: "./data/processed/wikitext-103" # Path to processed data
+  tokenizer_path: "./data/tokenizers/wikitext103_bpe.tokenizer.json" # Path to tokenizer
+  # tokenizer_max_length is usually in config['data'] and used by preprocessing.
+  # Should be >= sequence_length. If not set, a default is used in wikitext103.py.
+  tokenizer_max_length: 512 # Set explicitly for clarity during benchmark runs
+
+training:
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  num_epochs: 3 # Short duration for benchmarking purposes
+  gradient_clipping: 1.0
+  random_seed: 42
+  lr_scheduler:
+    type: "cosine_annealing"
+    warmup_steps: 500 # Example, adjust based on total steps if used for real pre-training
+    min_lr: 0.000005
+  # checkpoint_dir will be set by experiment_runner or a main script
+  # results_dir will be set by experiment_runner or a main script
+
+logging:
+  log_level: "INFO"
+  log_file: "bench_pas_seq512.log"
