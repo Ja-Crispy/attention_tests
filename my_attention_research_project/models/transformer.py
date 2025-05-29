@@ -212,8 +212,55 @@ class TransformerEncoder(nn.Module):
                 d_model=d_model, 
                 **ahc_constructor_params # Pass all other AHC-specific params
             )
-        # Add elif blocks here for PASAttention, MOAEAttention when they are implemented
-        # e.g., elif attention_type == "PAS": from .attention.pas_attention import PASAttention ...
+        elif attention_type == "PAS":
+            try:
+                from .attention.pas_attention import PASAttention
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import PASAttention for attention_type 'PAS'. "
+                    f"Ensure 'pas_attention.py' exists and is error-free. Original error: {e}"
+                )
+            
+            scanner_config = attention_config.get("scanner_config")
+            focused_attention_config = attention_config.get("focused_attention_config")
+            # Inherits from model's overall dropout_rate if not specified in PAS's part of attention_config
+            pas_dropout_rate = attention_config.get("dropout_rate", dropout_rate)
+
+            if scanner_config is None:
+                raise ValueError("scanner_config is required for PASAttention.")
+            if focused_attention_config is None:
+                raise ValueError("focused_attention_config is required for PASAttention.")
+
+            attention_module_instance = PASAttention(
+                d_model=d_model,
+                scanner_config=scanner_config,
+                focused_attention_config=focused_attention_config,
+                dropout_rate=pas_dropout_rate
+            )
+        elif attention_type == "MOAE":
+            try:
+                from .attention.moae_attention import MOAEAttention
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import MOAEAttention for attention_type 'MOAE'. "
+                    f"Ensure 'moae_attention.py' exists and is error-free. Original error: {e}"
+                )
+
+            expert_configs = attention_config.get("expert_configs")
+            gating_config = attention_config.get("gating_config")
+            moae_dropout_rate = attention_config.get("dropout_rate", dropout_rate)
+
+            if not isinstance(expert_configs, list) or not expert_configs:
+                raise ValueError("expert_configs (list of dicts) is required for MOAEAttention and cannot be empty.")
+            if not isinstance(gating_config, dict): # Check if it's a dictionary
+                raise ValueError("gating_config (dict) is required for MOAEAttention.")
+            
+            attention_module_instance = MOAEAttention(
+                d_model=d_model,
+                expert_configs=expert_configs,
+                gating_config=gating_config,
+                dropout_rate=moae_dropout_rate
+            )
         else:
             raise ValueError(f"Unsupported attention_type in config: '{attention_type}'")
 

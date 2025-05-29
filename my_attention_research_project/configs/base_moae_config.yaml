@@ -1,0 +1,64 @@
+# Base Configuration for Mixture of Attention Experts (MOAE)
+
+model:
+  # TransformerEncoder overall parameters (can be adjusted)
+  d_model: 512
+  num_encoder_layers: 6
+  ffn_dim_factor: 4 # d_ff = d_model * ffn_dim_factor
+  dropout_rate: 0.1 # General dropout for FFN, embeddings, etc.
+  use_positional_embeddings: True
+
+  # Attention specific configuration
+  attention:
+    type: "MOAE"
+    dropout_rate: 0.1 # Overall dropout for MOAEAttention module (if used, or as default)
+
+    expert_configs:
+      - type: "local_window_mha"
+        n_heads: 4
+        window_size: 32
+        dropout_rate: 0.1 # Expert-specific dropout
+      - type: "dilated_mha"
+        n_heads: 4
+        dilation_rate: 2 # Attend to keys at positions 0, 2, 4,...
+        dropout_rate: 0.1 # Expert-specific dropout
+      # Example of a potential third expert (full attention) - not implemented in MOAEAttention __init__ yet
+      # - type: "vanilla_mha" 
+      #   n_heads: 2 
+      #   dropout_rate: 0.1
+
+    gating_config:
+      type: "soft_gate_mlp"
+      hidden_dim: 64   # Hidden dimension for the gating MLP
+      dropout_rate: 0.1 # Dropout for the gating network
+
+# Data configuration (example, can be same as base_pas_config.yaml)
+data:
+  dataset_name: "WikiText103"
+  sequence_length: 512 
+  batch_size: 32
+  data_dir: "./data/processed/wikitext-103"
+  tokenizer_path: "./data/tokenizers/wikitext103_bpe.tokenizer.json"
+
+# Training configuration (example, can be same as other base configs)
+training:
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  num_epochs: 10 # Adjust as needed
+  random_seed: 42
+  gradient_clipping: 1.0
+  lr_scheduler:
+    type: "cosine_annealing"
+    warmup_steps: 1000
+    min_lr: 0.00001
+
+# Benchmarking specific settings
+benchmarking:
+  batch_size_inference: 64
+  perplexity_eval_sequence_lengths: [512, 1024, 2048] 
+
+# Logging
+logging:
+  log_level: "INFO"
+  log_file: "training_moae.log"

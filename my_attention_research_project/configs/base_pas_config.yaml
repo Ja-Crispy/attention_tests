@@ -1,0 +1,57 @@
+# Base Configuration for Perceiver Attention Sampling (PAS)
+
+model:
+  # TransformerEncoder overall parameters (can be adjusted)
+  d_model: 512
+  num_encoder_layers: 6
+  ffn_dim_factor: 4 # d_ff = d_model * ffn_dim_factor
+  dropout_rate: 0.1 # General dropout for FFN, embeddings, etc.
+  use_positional_embeddings: True
+
+  # Attention specific configuration
+  attention:
+    type: "PAS"       # Specifies the PAS attention module
+    # dropout_rate: 0.1 # Optional: Overall dropout for PAS module if it had other dropout layers.
+                        # PASAttention passes its dropout_rate to focused_attention_mha if not specified there.
+
+    scanner_config:
+      type: "PAS_P1_linear"
+      top_k_hotspots: 32
+      # Other scanner-specific parameters like projection dimensions could be added here
+      # if they were different from d_model or had specific needs.
+
+    focused_attention_config:
+      num_heads: 8        # Number of heads for the focused MultiHeadAttention
+      dropout_rate: 0.1   # Dropout rate for the focused MultiHeadAttention
+      # Other MHA-specific parameters (e.g., specific bias settings) could be added here.
+
+# Data configuration (example, can be same as base_mha_config.yaml or base_ahc_config.yaml)
+data:
+  dataset_name: "WikiText103"
+  sequence_length: 512 # Max sequence length. For PAS, ensure this is reasonable for top_k_hotspots.
+  batch_size: 32
+  data_dir: "./data/processed/wikitext-103"
+  tokenizer_path: "./data/tokenizers/wikitext103_bpe.tokenizer.json"
+
+# Training configuration (example, can be same as other base configs)
+training:
+  optimizer: "AdamW"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  num_epochs: 10 # Adjust as needed
+  random_seed: 42
+  gradient_clipping: 1.0
+  lr_scheduler:
+    type: "cosine_annealing"
+    warmup_steps: 1000
+    min_lr: 0.00001
+
+# Benchmarking specific settings
+benchmarking:
+  batch_size_inference: 64
+  perplexity_eval_sequence_lengths: [512, 1024, 2048] # Consider relation to top_k_hotspots and sequence_length
+
+# Logging
+logging:
+  log_level: "INFO"
+  log_file: "training_pas.log"
