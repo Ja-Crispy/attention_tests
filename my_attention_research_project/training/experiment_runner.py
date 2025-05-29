@@ -86,8 +86,29 @@ def main(): # This function serves as run_experiment
     logger.info("Downloading/creating raw text files...")
     download_raw_text_files(str(raw_data_dir))
 
-    logger.info("Preprocessing text files for Causal LM...")
-    preprocess_text_files_for_causal_lm(str(raw_data_dir), str(processed_data_dir), tokenizer_name_or_path, config)
+    # Check if preprocessing can be skipped
+    processed_files = ["train.jsonl", "valid.jsonl", "test.jsonl"]
+    all_processed_exist = all((processed_data_dir / pf).exists() for pf in processed_files)
+    
+    if all_processed_exist:
+        # Check if processed files are newer than raw files
+        raw_files = ["wiki.train.raw", "wiki.valid.raw", "wiki.test.raw"]
+        newest_raw_time = max((raw_data_dir / rf).stat().st_mtime for rf in raw_files if (raw_data_dir / rf).exists())
+        oldest_processed_time = min((processed_data_dir / pf).stat().st_mtime for pf in processed_files)
+        
+        if oldest_processed_time > newest_raw_time:
+            logger.info("Processed files are up-to-date. Skipping preprocessing...")
+            skip_preprocessing = True
+        else:
+            logger.info("Raw files are newer than processed files. Re-preprocessing...")
+            skip_preprocessing = False
+    else:
+        logger.info("Some processed files are missing. Preprocessing required...")
+        skip_preprocessing = False
+
+    if not skip_preprocessing:
+        logger.info("Preprocessing text files for Causal LM...")
+        preprocess_text_files_for_causal_lm(str(raw_data_dir), str(processed_data_dir), tokenizer_name_or_path, config)
 
     train_file = processed_data_dir / "train.jsonl"
     valid_file = processed_data_dir / "valid.jsonl"
