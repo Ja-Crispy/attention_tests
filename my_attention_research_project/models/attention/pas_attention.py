@@ -48,7 +48,7 @@ class PASAttention(nn.Module):
         
         self.focused_attention_mha = MultiHeadAttention(
             d_model=self.d_model, 
-            num_heads=mha_num_heads, 
+            n_heads=mha_num_heads, 
             dropout_rate=mha_dropout_rate
         )
         self.focused_attention = self._focused_sparse_attention
@@ -166,7 +166,7 @@ class PASAttention(nn.Module):
                 query: torch.Tensor, 
                 key: torch.Tensor, 
                 value: torch.Tensor, 
-                input_padding_mask: torch.Tensor = None):
+                mask: torch.Tensor = None):
         """
         Performs the forward pass of the PASAttention module.
 
@@ -174,13 +174,18 @@ class PASAttention(nn.Module):
             query: The query tensor (batch_size, seq_len_q, d_model).
             key: The key tensor (batch_size, seq_len_k_orig, d_model).
             value: The value tensor (batch_size, seq_len_k_orig, d_model).
-            input_padding_mask: An optional mask for input padding (batch_size, seq_len_k_orig).
-                                Assumed to be True/1 for valid, False/0 for padding.
+            mask: An optional mask for input padding (batch_size, seq_len_k_orig).
+                  Assumed to be True/1 for valid, False/0 for padding.
+                  This parameter is renamed from input_padding_mask for consistency
+                  with other attention modules in the TransformerEncoderLayer.
 
         Returns:
             context_vector: The output tensor from the focused attention mechanism.
             hotspot_indices: Indices of the top_k hotspots.
         """
+        # Map mask parameter to input_padding_mask for internal use
+        input_padding_mask = mask
+        
         hotspot_indices = None
         if self.scanner is not None:
             hotspot_indices = self.scanner(query, key, input_padding_mask)
